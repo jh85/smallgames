@@ -1,0 +1,18 @@
+# Local build products (including the numbered binaries from earlier revisions)
+/minigo
+/minigo[0-9]
+
+# Run logs, stdout captures and pid files
+/*.log
+/*.out
+/*.pid
+
+# Generated proof tables and book extracts; the small calibration results
+# under data/ are kept, everything else there is regenerated or downloaded.
+/data/*
+!/data/calib7x7*.tsv
+
+# Third-party material, not redistributed here (see README):
+# KataGo source tree and its 7x7 opening books
+/KataGo/
+/book7*.tar.gz

@@ -30,6 +30,10 @@ combinatorial games.
   position, by combining lookups in Takizawa's semi-strong tablebase (a third-party dataset,
   downloaded separately) with a built-in alpha–beta solver for whatever the table leaves
   undecided.
+- [minigo](minigo/README.md) — Go on small boards under Tromp-Taylor rules, by parallel
+  df-pn proof search rather than a backward sweep (Go's game graph is cyclic and superko
+  makes a full table ill-posed). 5×5 proved to be **B+25** in 86 minutes; 7×7 is approached
+  by solving selected book positions exactly.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
