@@ -1,0 +1,14 @@
+# Local build products
+/wdl6x6
+
+# Third-party dataset and tooling, not redistributed here (see README):
+# Takizawa's 6x6 tablebase from Zenodo record 18843225 and everything shipped
+# inside it, plus the reference engines cloned for comparison.
+/postprocess3/
+/postprocess3.tar.zst*
+/optimal_reopening_ab_table_all_*.txt
+/query_6x6.py
+/edax-reversi/
+/Egaroucid/
+/reopening-alphabeta-experiment/
+/*.pdf
