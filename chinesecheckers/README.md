@@ -49,8 +49,12 @@ Requirements: Linux, g++ ≥ 11 (C++20), ~145 GB RAM for the 6×6 solve
   value iteration with no symmetry reduction) used to validate the
   optimized solver state-by-state; also implements the rule variants used
   in the rule-discrepancy investigation (`--null`, `--nogoalexit`,
-  `--part2soft`, `--nostartentry[2]`, `--passalways`, `--originoccupied`,
-  `--layers`).
+  `--part2soft`, `--nostartentry[2]`, `--passalways`, `--originoccupied`).
+  `--layers` is not a rule variant: it makes each value-iteration pass read
+  a snapshot of the previous pass instead of updating in place, so a pass
+  index equals a depth layer. It reaches the same fixpoint with the same
+  values, just in more passes (4×4/6: 39 layers vs 26 in-place passes),
+  which is what makes it useful for reading off proof depth.
 * `src/crosscheck M P <bf.val> <run_dir>` — compares every full-space state
   value from a brute-force dump against the canonical table (exercises both
   symmetry maps and the ranking on every state).

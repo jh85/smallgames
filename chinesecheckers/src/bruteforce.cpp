@@ -26,6 +26,8 @@ static int ownStartEntry = 0;       // 0 = allowed, 1 = forbidden from outside,
                                     // 2 = always forbidden (dest in own start)
 static bool passAlways = false;     // every state has a pass successor
 static bool originOccupied = false; // origin stays occupied during hop chains
+static bool layered = false;        // value iteration reads the previous pass's
+                                    // snapshot instead of updating in place
 static int gridId[7][7];        // (x,y) -> id, -1 outside
 static int cx[49], cy[49];      // id -> coords
 static u64 binom[64][16];
@@ -282,6 +284,9 @@ int main(int argc, char** argv) {
     } else if (!strcmp(argv[i], "--originoccupied")) {
       originOccupied = true;
       argv[i] = nullptr;
+    } else if (!strcmp(argv[i], "--layers")) {
+      layered = true;
+      argv[i] = nullptr;
     }
   // compact argv after flag removal
   {
@@ -312,10 +317,6 @@ int main(int argc, char** argv) {
   });
   printf("illegal=%llu terminal_losses=%llu\n", (unsigned long long)nIll,
          (unsigned long long)nTermLoss);
-
-  bool layered = false;
-  for (int i = 3; i < argc; i++)
-    if (argv[i] && !strcmp(argv[i], "--layers")) layered = true;
 
   // Phase 2: value iteration to fixpoint.
   u64 stuckLoss = 0;
