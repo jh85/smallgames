@@ -78,16 +78,6 @@ board, side to move, WDL for the side to move, and per-move values.
 The tables are **not** stored in this repository — 7×6 alone is 615 GiB. Everything needed
 to regenerate them is here.
 
-The **slab files are bit-for-bit reproducible**: a fresh solve reproduces the `slab_*.bin`
-digests in `checksums/` exactly, regardless of thread count (verified on 4×4). `zdd.bin` is
-**not** — the forest is built with lock-free hash-consing, so racing inserts leave slightly
-different sets of equivalent nodes and the file's size and digest vary from run to run. That
-is harmless: rank is the lexicographic index of a position within the represented set, which
-is canonical no matter how the nodes end up shared, which is precisely why the slabs still
-match. Every build also verifies its per-ply root counts against the independent counting DP
-before saving. So compare rebuilt slabs against `checksums/`, but expect a locally rebuilt
-`zdd.bin` to differ from the published one.
-
 ```
 make
 ./c4 count    --board 4x4 --brute    # optional: DP vs brute-force enumeration
@@ -99,6 +89,16 @@ Replace `--board 4x4` with `6x4`, `5x5`, or `7x6`. `solve` writes `zdd.bin` plus
 `slab_{ply}.bin` per ply into the board directory; it is **resumable** — each ply is written
 to `slab_{ply}.bin.tmp` and renamed on completion, so re-running the same command continues
 at the first missing ply.
+
+**On reproducibility.** The slab files are bit-for-bit reproducible: a fresh solve
+reproduces the `slab_*.bin` digests in `checksums/` exactly, regardless of thread count
+(verified on 4×4). `zdd.bin` is not — the forest is built with lock-free hash-consing, so
+racing inserts leave slightly different sets of equivalent nodes, and the file's size and
+digest vary from run to run. That is harmless: rank is the lexicographic index of a position
+within the represented set, which is canonical no matter how the nodes end up shared, and
+that is precisely why the slabs still match. Every build also verifies its per-ply root
+counts against the independent counting DP before saving. So compare rebuilt slabs against
+`checksums/`, but expect a locally rebuilt `zdd.bin` to differ from the published one.
 
 | board | files | total size | notes |
 |---|---|---|---|
@@ -117,31 +117,67 @@ For the full 7×6 run:
 
 ## Downloading and verifying the tables
 
-The tables are hosted outside this repository. They are published as the **individual slab
-files, not a single concatenated blob** — the solver opens `slab_{ply}.bin` by name and only
-ever needs a couple of plies at a time, so per-file distribution lets you fetch a subset
-(the low plies are tiny), resume an interrupted transfer, verify in parallel, and identify
-precisely which file is corrupt.
+The tables are hosted outside this repository. Each board is published as one
+`c4_wdl_<W>x<H>.tar.zst` archive holding the whole board directory. The WDL data compresses
+7.4×, so 7×6 is an 83 GiB download that expands to 615 GiB.
 
-`checksums/` holds one `sha256sum`-format manifest per board. To verify a download:
+| board | archive | expands to | SHA-256 of archive | download |
+|---|---|---|---|---|
+| 4×4 | 58,914 B | 150,944 B | `9c78714b6b42b2591c5ea08bc086d9f5d237368ac019da991d436b8a0605fe7c` | not published yet |
+| 5×5 | 8,465,218 B | 20,637,575 B | `7fe5840723bdd538845a17ba88ee8cf1dccad41db3b67d3a72dc73160e18a312` | not published yet |
+| 6×4 | 7,524,475 B | 22,212,456 B | `242787a3f393685d0202f7787534643edcde2c08db0f3c48d0b1c660a4824567` | not published yet |
+| 7×6 | 89,216,767,476 B | 660,138,684,135 B | `2a79d7a429d59a346c2bbf3fdb84afd9620fe70236d363f5f42f87b37064a79e` | not published yet |
+
+Extract into this directory, which recreates `c4_wdl_<W>x<H>/` where the solver expects it:
 
 ```
-cd c4_wdl_7x6
-sha256sum -c ../checksums/c4_wdl_7x6.SHA256SUMS
+echo "2a79d7a429d59a346c2bbf3fdb84afd9620fe70236d363f5f42f87b37064a79e  c4_wdl_7x6.tar.zst" \
+  | sha256sum -c -
+tar --zstd -xf c4_wdl_7x6.tar.zst
 ```
 
-| board | manifest | download |
-|---|---|---|
-| 4×4 | [`checksums/c4_wdl_4x4.SHA256SUMS`](checksums/c4_wdl_4x4.SHA256SUMS) | not published yet |
-| 6×4 | [`checksums/c4_wdl_6x4.SHA256SUMS`](checksums/c4_wdl_6x4.SHA256SUMS) | not published yet |
-| 5×5 | [`checksums/c4_wdl_5x5.SHA256SUMS`](checksums/c4_wdl_5x5.SHA256SUMS) | not published yet |
-| 7×6 | [`checksums/c4_wdl_7x6.SHA256SUMS`](checksums/c4_wdl_7x6.SHA256SUMS) | not published yet |
+Or stream it, which never stores the archive — useful for 7×6, since it needs only the
+615 GiB of extracted output rather than 615 + 83:
 
-The manifests cover `zdd.bin` too, so they fully verify a *download*. They will not match a
-locally rebuilt `zdd.bin` — see the note above.
+```
+curl -sL <url> | tar --zstd -xf -
+```
+
+The archives are made with `zstd -12 --long=27 -T0`. The 128 MiB window is exactly zstd's
+default decoder limit, so stock `tar --zstd -xf` and `zstd -d` work with **no extra flags**.
+`--long=31` compresses ~10% better, but its 2 GiB window exceeds that limit: every downloader
+would have to pass `--long=31` or `--memory=2048MB`, and plain `tar --zstd -xf` fails with
+"Frame requires too much memory for decoding". Not worth 10%.
+
+After extracting, `checksums/` holds a `sha256sum`-format manifest per board that verifies
+the files individually — worth running on the 7×6 set, and the way to tell *which* slab is
+bad rather than just that something is:
+
+```
+cd c4_wdl_7x6 && sha256sum -c ../checksums/c4_wdl_7x6.SHA256SUMS
+```
+
+The manifests cover `zdd.bin` too, so they fully verify an extracted download. They will not
+match a locally rebuilt `zdd.bin` — see the note above.
 
 Slab format: 2 bits per position indexed by the ply's ZDD rank (0 = draw, 1 = win, 2 = loss,
 from the side to move's perspective).
+
+### Rebuilding the archives
+
+```
+cd <parent of c4_wdl_7x6>
+tar -cf - c4_wdl_7x6 | zstd -q -12 --long=27 -T0 -o c4_wdl_7x6.tar.zst
+```
+
+7×6 takes ~34 min on 64 threads. To check an archive's contents without unpacking 615 GiB to
+disk, stream each member through `sha256sum` and diff the result against the manifest:
+
+```
+zstd -dc --long=27 c4_wdl_7x6.tar.zst \
+  | tar -xf - --to-command='sh -c "sha256sum | sed \"s|-\$|\$TAR_FILENAME|\""' \
+  | sed 's|  .*/|  |' | sort -k2 -V | diff - checksums/c4_wdl_7x6.SHA256SUMS
+```
 
 ## Reference solver (not included)
 
