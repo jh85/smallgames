@@ -1,0 +1,8 @@
+# Local build products
+/bt
+
+# Generated run logs
+/*.log
+
+# Generated slab tables (708 GB across all boards)
+/data/

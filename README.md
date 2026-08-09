@@ -22,6 +22,10 @@ combinatorial games.
   Chinese Checkers on m×m diamond boards, following Sturtevant (ACG 2019). The 6×6/6 game
   (2,313,100,389,600 positions) is solved in 19.8 h to a 144.7 GB WDL table; the initial
   position is a **first-player win**.
+- [Breakthrough](breakthrough/README.md) — a C++20 ZDD strong solver for small Breakthrough
+  boards, exploiting the game's acyclic advancement measure for a single backward sweep with
+  no fixpoint. Five boards solved up to 5×6 (3,329,979,278,282 states): every 6-rank board
+  is a first-player win, every shorter board a second-player win.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
