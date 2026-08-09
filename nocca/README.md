@@ -64,13 +64,33 @@ verdict. Convergence is at pass 70.
 
 ### Published tables
 
-The generated tables are hosted outside this repository. Verify a download with
-`sha256sum -c` against these digests:
+The generated tables are hosted outside this repository, **zstd-compressed**. A packed 2-bit
+WDL table is highly redundant, so `wdl_5x6.bin` shrinks 51.8× — 34.5 GiB down to a 681 MiB
+download. Decompress with `zstd -d wdl_5x6.bin.zst`.
 
-| table | size (bytes) | download | SHA-256 |
+| table | download | compressed | uncompressed |
 |---|---|---|---|
-| `wdl_3x3.bin` | 20,816 | not published yet | `df3e40c96e83164d817621ed951af8000de8c84bdc40d042d286755ae5f21390` |
-| `wdl_5x6.bin` | 36,992,483,016 | not published yet | `6d752da11d0c3b339b352dca0179b918a6ee5a28acd5bef49eddd130c87b8715` |
+| `wdl_3x3.bin.zst` | not published yet | 2,903 B | 20,816 B |
+| `wdl_5x6.bin.zst` | not published yet | 713,812,191 B | 36,992,483,016 B |
+
+Verify with `sha256sum -c` against these digests — the compressed file as downloaded, or the
+decompressed table (which is also what a local solve reproduces):
+
+| file | SHA-256 |
+|---|---|
+| `wdl_3x3.bin.zst` | `c6b797d771991ceaa7706a959393daafd8652f0f0fef13b5f6661caac7977744` |
+| `wdl_5x6.bin.zst` | `5bceb3640d9650303e308c18023fe4ac54defdc750f7a9b17ffa25d511a10979` |
+| `wdl_3x3.bin` | `df3e40c96e83164d817621ed951af8000de8c84bdc40d042d286755ae5f21390` |
+| `wdl_5x6.bin` | `6d752da11d0c3b339b352dca0179b918a6ee5a28acd5bef49eddd130c87b8715` |
+
+To check without unpacking 34.5 GiB to disk:
+
+```
+zstd -dc wdl_5x6.bin.zst | sha256sum
+```
+
+The archives were produced with `zstd -12 --long=27 -T0`; the 128 MiB window is zstd's
+default decoder limit, so plain `zstd -d` works with no extra flags.
 
 ## Position input format (`probe`)
 
