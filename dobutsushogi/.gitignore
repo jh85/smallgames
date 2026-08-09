@@ -1,0 +1,18 @@
+# Local build products
+/dobutsu
+
+# Generated run, audit, and validation logs
+/*.log
+
+# Generated WDL+K tables and atomic checkpoint files
+/wdl_*.bin
+/wdl_*.bin.tmp
+
+# Reachability traversal work/frontier files
+/reach_work_*.bin
+/reach_frontier_*.bin
+/reach_frontier_*.tmp
+/reach_*.log
+
+# Independent reference dumps (multi-gigabyte files)
+/rust_dump*.bin
