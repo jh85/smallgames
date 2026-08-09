@@ -1,0 +1,13 @@
+# Local build products
+/qwdl
+
+# Run logs and editor scratch
+/*.log
+/.*.sw[po]
+
+# Saved WDL tables (238 GB across the four solved games)
+/tables/
+
+# Third-party material, not redistributed here (see README)
+/quoridor-solving/
+/*.pdf

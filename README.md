@@ -34,6 +34,10 @@ combinatorial games.
   df-pn proof search rather than a backward sweep (Go's game graph is cyclic and superko
   makes a full table ill-posed). 5×5 proved to be **B+25** in 86 minutes; 7×7 is approached
   by solving selected book positions exactly.
+- [Quoridor](quoridor/README.md) — a C++17/OpenMP strong solver using a ZDD over wall
+  configurations plus layered retrograde analysis over the DAG of wall counts. 6×6 is a
+  **first-player win** at every wall count solved (0–4); 7×7 is a **second-player win**
+  through 3 walls per player.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
