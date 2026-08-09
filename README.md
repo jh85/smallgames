@@ -14,6 +14,10 @@ combinatorial games.
 - [Connect Four](connect4/README.md) — a C++20 ZDD/retrograde strong solver for 7×6 and
   smaller boards: 2,637,477,442,337 pseudo-legal non-terminal positions tabulated in ~9 h,
   validated record-for-record against an independent BDD solution.
+- [N Men's Morris](nmm/README.md) — a C++20 two-ZDD strong solver extending Takeda & Hoki
+  (IPSJ SIG-GI 2020) with placement-phase indexing and cyclic retrograde analysis. Twelve
+  Men's Morris is a **first-player win**; a 16MM variant is implemented but stage-gated as
+  infeasible on one machine.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.

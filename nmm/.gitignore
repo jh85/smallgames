@@ -1,0 +1,11 @@
+# CMake build tree and local build products
+/build/
+
+# Generated run and validation logs
+/*.log
+
+# Generated ZDD2 forests and packed WDL partition tables (44 GiB for 12MM)
+/data/
+
+# Third-party material, not redistributed here (see README)
+/*.pdf
