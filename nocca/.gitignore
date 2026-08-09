@@ -1,0 +1,9 @@
+# Local build products
+/nocca
+
+# Generated run and validation logs
+/*.log
+
+# Generated WDL tables and atomic checkpoint files (up to ~34.5 GiB)
+/wdl_*.bin
+/wdl_*.bin.tmp
