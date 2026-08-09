@@ -1,0 +1,15 @@
+# Local build products (the Makefile builds binaries next to their sources)
+/src/solver
+/src/bruteforce
+/src/query
+/src/crosscheck
+/src/rulecount
+/src/zddbench
+/tests/unit_tests
+
+# Solve outputs: table.bin / groups.bin / meta.txt / log.txt per run,
+# plus brute-force dumps (135 GB for the 6x6 run)
+/runs/
+
+# Third-party material, not redistributed here (see README)
+/*.pdf

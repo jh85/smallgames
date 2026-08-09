@@ -18,6 +18,10 @@ combinatorial games.
   (IPSJ SIG-GI 2020) with placement-phase indexing and cyclic retrograde analysis. Twelve
   Men's Morris is a **first-player win**; a 16MM variant is implemented but stage-gated as
   infeasible on one machine.
+- [Chinese Checkers](chinesecheckers/README.md) — a C++20 strong solver for two-player
+  Chinese Checkers on m×m diamond boards, following Sturtevant (ACG 2019). The 6×6/6 game
+  (2,313,100,389,600 positions) is solved in 19.8 h to a 144.7 GB WDL table; the initial
+  position is a **first-player win**.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
