@@ -11,3 +11,9 @@ combinatorial games.
 - [NOCCA × NOCCA](nocca/README.md) — a C++20 ZDD/retrograde strong solver for the 5×6
   game and its 3×3 variant, reproducing Yamamoto & Hoki (GPW 2022): all 147,969,899,280
   positions valued, initial position a first-player win decided at pass 41.
+- [Connect Four](connect4/README.md) — a C++20 ZDD/retrograde strong solver for 7×6 and
+  smaller boards: 2,637,477,442,337 pseudo-legal non-terminal positions tabulated in ~9 h,
+  validated record-for-record against an independent BDD solution.
+
+Generated tables are kept out of git and published separately; each project's README
+records how to regenerate them and the SHA-256 digests to verify a download against.

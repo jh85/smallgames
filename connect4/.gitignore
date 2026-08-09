@@ -1,0 +1,13 @@
+# Local build products
+/c4
+
+# Generated run and validation logs
+/*.log
+
+# Generated ZDD forests and packed WDL slab tables (615 GiB for 7x6)
+/c4_wdl_*/
+
+# Third-party material, not redistributed here:
+#   the reference BDD solver is cloned separately (see README)
+/Connect4-Strong-Solver/
+/*.pdf
