@@ -38,6 +38,9 @@ combinatorial games.
   configurations plus layered retrograde analysis over the DAG of wall counts. 6×6 is a
   **first-player win** at every wall count solved (0–4); 7×7 is a **second-player win**
   through 3 walls per player.
+- [TwixT](twixt/README.md) — an exact C++17 solver for auto-link computer TwixT on square
+  and rectangular boards, with reachable-state census, layered strong retrograde analysis,
+  portable WDL databases, and a database probe for policy evaluation.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
