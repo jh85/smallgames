@@ -5,10 +5,11 @@ ZDD-based minimal perfect hash and retrograde analysis — the NOCCA × NOCCA ar
 (after Yamamoto & Hoki, GPW 2022), extended to a game with captures, pieces in hand,
 drops, and promotion. Produces a packed 2-bit WDL table answering win/draw/loss for any
 position. Both full oriented indexing and dense left/right-reflection-orbit indexing are
-supported. Results through 6×3 have been computed; the reflection-reduced 7×3 production
-solve is in progress as of 2026-08-08, and 8×3 is supported but not yet solved.
+supported. Results through 7×3 have been computed, including reflection-reduced K
+reachability planes for 4×3 through 7×3. The 8×3 variant is supported but has not yet
+been solved.
 
-## Results (solved + validated 2026-07-30)
+## Results — 4×3 (solved + validated 2026-07-30)
 
 * **Gote (the second player) wins**: the initial position is a LOSS for Sente, decided at
   retrograde pass **78** — reproducing Tanaka (2009)'s famous 78-ply result.
@@ -68,13 +69,30 @@ solve is in progress as of 2026-08-08, and 8×3 is supported but not yet solved.
   independent depth-bounded minimax spot checks (passed), mirror-value consistency
   (passed), and the record-by-record validation of this exact code at 4×3 and 5×3.
 
-## Supported larger variants (not yet solved)
+## Results — 7×3 variant (`--board 7x3 --symmetry lr`, solved 2026-08-10)
 
-The independent ZDD/DP count cross-check and all structural self-tests pass at both sizes:
+* **The initial position is a DRAW.**
+* Reflection-reduced position space: **159,318,056,898** pseudo-position orbits (ZDD:
+  35,844 nodes), independently cross-checked from 318,621,272,760 full positions and
+  14,841,036 mirror-fixed positions. W/L/D =
+  **116,446,807,296 / 36,919,973,915 / 5,951,275,687**. The last new values were found
+  at pass 285 and the solve converged at pass 286.
+* Solve time on 2× EPYC 9115 (64 threads): **160,731.5 seconds** (44 h 39 min).
+* The forward traversal found **117,526,891,855 reachable reflection orbits** in
+  **4,043.7 seconds** (1 h 7 min). `reach-audit` verified the exact K popcount, initial
+  bit, padding, and file size.
+* The final version-3 reduced WDL+K table is **59,744,279,544 bytes**. SHA-256:
+  `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f`.
+* The independent ZDD/DP count cross-check and structural self-tests pass. There is no
+  independent reference result or full-index table at this size, and a complete
+  fixpoint audit has not yet been run.
+
+## 8×3 support (not yet solved)
+
+The independent ZDD/DP count cross-check and all structural self-tests pass:
 
 | board | full positions | reflection orbits | reduced ZDD nodes | reduced WDL |
 |---|---:|---:|---:|---:|
-| 7×3 | 318,621,272,760 | 159,318,056,898 | 35,844 | 39,829,522,424 bytes |
 | 8×3 | 1,107,543,870,153 | 553,797,891,822 | 43,481 | 138,449,481,152 bytes |
 
 ## Reflection reduction, reachability, and table formats
@@ -97,6 +115,8 @@ is the header updated. Interrupted work resumes from mode-specific `reach_work_*
 
 ./dobutsu solve --board 7x3 --symmetry lr --threads 64 --ckpt 5
 ./dobutsu reach --board 7x3 --symmetry lr --threads 64
+./dobutsu reach-audit --board 7x3 --symmetry lr
+./dobutsu info --board 7x3 --symmetry lr
 ```
 
 The C++ ZDD assigns separate ranks to left/right reflections. Consequently its 4×3 K plane
@@ -171,8 +191,8 @@ URL, byte size, and SHA-256 digest here after choosing the artifact host:
 | 4×3 full v2 | not published yet | `bbbed0ea5ea0dc0db12d2c6cd646bd5a60efd9d4535dde53ca8989ab73ee7b13` |
 | 4×3 reduced v3 | not published yet | `3b28fcf677567f81f904d58b64d078f44b8002fd8848a7942ea109794815c2f1` |
 | 5×3 reduced v3 | not published yet | `692ec9297bd028eb9b1e419a1670327c8a2db1773bdea57353ee9e62b8db7562` |
-| 6×3 | not published yet | — |
-| 7×3 | not published yet | — |
+| 6×3 reduced v3 | not published yet | `3e60fdd7c61873d98c8f0ed8d3a11445f3a2c80a4fcfb860cb027fb3715eaad1` |
+| 7×3 reduced v3 | not published yet | `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f` |
 
 Probe cells are row-major from row 0 (White/Gote's home, top) to row `ROWS-1` (Sente's
 home): `.` empty, `LEGCH` = Sente's Lion/Elephant/Giraffe/Chick/Hen, `legch` = Gote's.
