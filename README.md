@@ -41,6 +41,10 @@ combinatorial games.
 - [TwixT](twixt/README.md) — an exact C++17 solver for auto-link computer TwixT on square
   and rectangular boards, with reachable-state census, layered strong retrograde analysis,
   portable WDL databases, and a database probe for policy evaluation.
+- [Mini-Shobu](shobu/README.md) — a C++17 retrograde strong solver for 2-board variants of
+  Shobu (full 4-board Shobu, ≈2.6×10²⁵ states, is infeasible). All solved variants up to
+  4×3/3×4 boards (3.75×10⁹ states each) are **first-player wins**; rules validated by
+  replaying all 104,396 games of a public dataset against a reference engine.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.

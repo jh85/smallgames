@@ -1,0 +1,9 @@
+# third-party / large local artifacts, not part of the solver
+Shobu/
+Shobu_Games_104k_Dataset/
+*.zip
+solver/
+*.wdl
+*.log
+minishobu
+__pycache__/

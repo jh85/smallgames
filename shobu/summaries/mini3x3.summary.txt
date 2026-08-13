@@ -1,0 +1,8 @@
+Mini-Shobu W=3 H=3 K=3
+state space (product, <=3 stones/color/board): 92452802
+reachable from initial: 22439236 (24.3%)
+reachable WIN:  12600068 (max depth 39)
+reachable LOSS: 7585804 (max depth 40)
+reachable DRAW: 2253364
+terminals (incl. unreachable): 6909602, stalemates: 2740244
+initial state id=69876801 value=WIN depth=17
