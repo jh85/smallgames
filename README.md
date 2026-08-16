@@ -45,7 +45,7 @@ combinatorial games.
   Shobu (full 4-board Shobu, ≈2.6×10²⁵ states, is infeasible). All solved variants up to
   4×3/3×4 boards (3.75×10⁹ states each) are **first-player wins**; rules validated by
   replaying all 104,396 games of a public dataset against a reference engine.
-- [Amazons](amazon/amazons/README.md) — a C++20 strong solver for small Game of the
+- [Amazons](amazon/README.md) — a C++20 strong solver for small Game of the
   Amazons boards, following Song & Müller (TCIAIG 2015) with a single AND/OR engine that
   runs both df-pn and BNS branch-number arithmetics, plus a ZDD verdict database.
   Includes exhaustive one-amazon retrograde WDL tables for small boards and an

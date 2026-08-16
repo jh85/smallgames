@@ -1,7 +1,7 @@
 /JHBR3/
-/amazons/build/
-/amazons/build-dbg/
-/amazons/wdl/
+/build/
+/build-dbg/
+/wdl/
 /wdlrun/
 /scratch/
 /paper.pdf

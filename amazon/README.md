@@ -4,10 +4,10 @@ A standalone C++20 program that **strongly solves** (exact win/loss game-theoret
 value) small variants of the Game of the Amazons, following
 
 > J. Song and M. Müller, *An Enhanced Solver for the Game of Amazons*,
-> IEEE TCIAIG 7(1), 2015 (`../paper.pdf`).
+> IEEE TCIAIG 7(1), 2015 (`paper.pdf`).
 
 and replacing/augmenting its df-pn search with the **BNS branch-number
-arithmetic** ported from the shogi mate solver in `../JHBR3/mate/bns.{h,cc}`
+arithmetic** ported from the shogi mate solver in `JHBR3/mate/bns.{h,cc}`
 (Okabe's route-branch-number search).  Both arithmetics run in the *same*
 search engine (a template/flag picks the number arithmetic only), which makes
 the BNS-vs-df-pn comparison exact and lets each algorithm borrow the other's
@@ -239,7 +239,7 @@ per layer from the child tables.  Validated end-to-end on 4x4 (root L),
 matches the independent `layercount` enumerator exactly, and every stored
 verdict (3.1e9 positions per board) was re-derived from the child tables
 by the independent `wdlcheck` checker (`tools/wdlcheck.cc`).  The built 4x5 and 5x4 tables are kept in
-`../wdlrun/` (keys + 2-bit verdicts, ~25 GB each).
+`wdlrun/` (keys + 2-bit verdicts, ~25 GB each).
 
 ## Scope / not implemented
 
