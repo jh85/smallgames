@@ -45,6 +45,16 @@ combinatorial games.
   Shobu (full 4-board Shobu, ≈2.6×10²⁵ states, is infeasible). All solved variants up to
   4×3/3×4 boards (3.75×10⁹ states each) are **first-player wins**; rules validated by
   replaying all 104,396 games of a public dataset against a reference engine.
+- [Amazons](amazon/amazons/README.md) — a C++20 strong solver for small Game of the
+  Amazons boards, following Song & Müller (TCIAIG 2015) with a single AND/OR engine that
+  runs both df-pn and BNS branch-number arithmetics, plus a ZDD verdict database.
+  Includes exhaustive one-amazon retrograde WDL tables for small boards and an
+  external-memory, checkpointed layered retrograde builder (`wdlretro`).  Full
+  standard-setup tables were built for 4×4, 4×5 and 5×4 (~3.1×10⁹ positions each,
+  cross-validated layer-by-layer against an independent enumerator): 4×4 is a
+  second-player win and 5×4 a first-player win as in the literature, while 4×5 comes
+  out a **second-player win**, contradicting Table I of the paper — the validation
+  evidence is documented in the project README.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
