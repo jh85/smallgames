@@ -207,17 +207,29 @@ either name. Tables and reference dumps are read and written relative to the cur
 working directory, so the solver tree can be moved without changing source code.
 
 Generated WDL tables, reference dumps, reachability work files, and the compiled executable
-are excluded by `.gitignore`. They should be published separately; record a direct download
-URL, byte size, and SHA-256 digest here after choosing the artifact host:
+are excluded by `.gitignore`. The completed reflection-reduced version-3 WDL+K tables are
+published in the [Dobutsu Shogi WDL Databases dataset on Hugging Face](https://huggingface.co/datasets/eii/dobutsushogi).
+The 4×3 through 6×3 tables are single-file downloads. The 7×3 and 8×3 tables are split
+into 20 GiB parts (except for each final part) and must be reconstructed after download.
+The full-rank 4×3 version-2 table has not been published.
 
-| board/format | external WDL+K download | SHA-256 |
-|---|---|---|
-| 4×3 full v2 | not published yet | `bbbed0ea5ea0dc0db12d2c6cd646bd5a60efd9d4535dde53ca8989ab73ee7b13` |
-| 4×3 reduced v3 | not published yet | `3b28fcf677567f81f904d58b64d078f44b8002fd8848a7942ea109794815c2f1` |
-| 5×3 reduced v3 | not published yet | `692ec9297bd028eb9b1e419a1670327c8a2db1773bdea57353ee9e62b8db7562` |
-| 6×3 reduced v3 | not published yet | `3e60fdd7c61873d98c8f0ed8d3a11445f3a2c80a4fcfb860cb027fb3715eaad1` |
-| 7×3 reduced v3 | not published yet | `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f` |
-| 8×3 reduced v3 | not published yet | `b40ffd55b2d7c77334e5957f5e5b3003c76bf0d5120cc058924511a0c90d8b8c` |
+| board/format | WDL+K download | size (bytes) | SHA-256 |
+|---|---|---:|---|
+| 4×3 full v2 | not published | 440,987,376 | `bbbed0ea5ea0dc0db12d2c6cd646bd5a60efd9d4535dde53ca8989ab73ee7b13` |
+| 4×3 reduced v3 | [single file](https://huggingface.co/datasets/eii/dobutsushogi/resolve/main/data/wdl_4x3_lr.bin?download=true) | 220,516,424 | `3b28fcf677567f81f904d58b64d078f44b8002fd8848a7942ea109794815c2f1` |
+| 5×3 reduced v3 | [single file](https://huggingface.co/datasets/eii/dobutsushogi/resolve/main/data/wdl_5x3_lr.bin?download=true) | 2,247,527,576 | `692ec9297bd028eb9b1e419a1670327c8a2db1773bdea57353ee9e62b8db7562` |
+| 6×3 reduced v3 | [single file](https://huggingface.co/datasets/eii/dobutsushogi/resolve/main/data/wdl_6x3_lr.bin?download=true) | 13,670,959,464 | `3e60fdd7c61873d98c8f0ed8d3a11445f3a2c80a4fcfb860cb027fb3715eaad1` |
+| 7×3 reduced v3 | [3 parts](https://huggingface.co/datasets/eii/dobutsushogi/tree/main/data/wdl_7x3_lr.bin.parts) | 59,744,279,544 | `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f` |
+| 8×3 reduced v3 | [10 parts](https://huggingface.co/datasets/eii/dobutsushogi/tree/main/data/wdl_8x3_lr.bin.parts) | 207,674,217,632 | `b40ffd55b2d7c77334e5957f5e5b3003c76bf0d5120cc058924511a0c90d8b8c` |
+
+Reconstruct the split tables from the directory containing their downloaded parts, then
+verify the finished files against the hashes above:
+
+```bash
+cat wdl_7x3_lr.bin.part* > wdl_7x3_lr.bin
+cat wdl_8x3_lr.bin.part* > wdl_8x3_lr.bin
+sha256sum wdl_{4,5,6,7,8}x3_lr.bin
+```
 
 Probe cells are row-major from row 0 (White/Gote's home, top) to row `ROWS-1` (Sente's
 home): `.` empty, `LEGCH` = Sente's Lion/Elephant/Giraffe/Chick/Hen, `legch` = Gote's.
