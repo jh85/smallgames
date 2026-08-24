@@ -5,9 +5,22 @@ ZDD-based minimal perfect hash and retrograde analysis — the NOCCA × NOCCA ar
 (after Yamamoto & Hoki, GPW 2022), extended to a game with captures, pieces in hand,
 drops, and promotion. Produces a packed 2-bit WDL table answering win/draw/loss for any
 position. Both full oriented indexing and dense left/right-reflection-orbit indexing are
-supported. Results through 7×3 have been computed, including reflection-reduced K
-reachability planes for 4×3 through 7×3. The 8×3 variant is supported but has not yet
-been solved.
+supported. Production strong solves and reflection-reduced K reachability traversals have
+been completed for every board size from 4×3 through 8×3.
+
+## Solved values and reachable position counts
+
+The reachable counts below are left/right-reflection orbits, as reported by
+`./dobutsu info --board ROWSx3 --symmetry lr`. The WDL solve covers the entire indexed
+orbit universe; the K plane identifies the subset reachable from the initial position.
+
+| board | initial value | indexed orbits | reachable orbits | convergence pass |
+|---|---|---:|---:|---:|
+| 4×3 | Gote wins (Sente loss) | 588,021,930 | 246,803,167 | 174 |
+| 5×3 | draw | 5,993,385,012 | 3,359,910,526 | 192 |
+| 6×3 | draw | 36,455,870,040 | 24,234,040,896 | 244 |
+| 7×3 | draw | 159,318,056,898 | 117,526,891,855 | 286 |
+| 8×3 | draw | 553,797,891,822 | 437,313,446,641 | 321 |
 
 ## Results — 4×3 (solved + validated 2026-07-30)
 
@@ -63,6 +76,7 @@ been solved.
 * Position space: **72,908,154,405** pseudo-reachable positions (ZDD: 9,142 nodes);
   totals W/L/D = 55,023,935,614 / 16,019,869,041 / 1,864,349,750. Longest forced win:
   **243 plies** (convergence at pass 244). Solve time: 11.4 h; `wdl_6x3.bin` is 18.2 GB.
+* The reflection-reduced K plane contains **24,234,040,896 reachable orbits**.
 * Validation: no independent reference solver exists at this size (the Rust reference's
   in-memory pipeline does not fit and its disk mode computes no values), so 6×3 rests on:
   the full fixpoint audit over all 72.9 G positions (**passed, 0 inconsistencies**),
@@ -87,13 +101,23 @@ been solved.
   independent reference result or full-index table at this size, and a complete
   fixpoint audit has not yet been run.
 
-## 8×3 support (not yet solved)
+## Results — 8×3 variant (`--board 8x3 --symmetry lr`, solved 2026-08-21)
 
-The independent ZDD/DP count cross-check and all structural self-tests pass:
-
-| board | full positions | reflection orbits | reduced ZDD nodes | reduced WDL |
-|---|---:|---:|---:|---:|
-| 8×3 | 1,107,543,870,153 | 553,797,891,822 | 43,481 | 138,449,481,152 bytes |
+* **The initial position is a DRAW**; all four opening moves draw.
+* Reflection-reduced position space: **553,797,891,822** pseudo-position orbits (ZDD:
+  43,481 nodes), independently cross-checked from 1,107,543,870,153 full positions and
+  51,913,491 mirror-fixed positions. W/L/D =
+  **392,402,188,126 / 134,888,767,156 / 26,506,936,540**. The last new values were found
+  at pass 320 and the solve converged at pass 321.
+* Aggregate retrograde pass time on 2× EPYC 9115 (64 threads): **839,082.4 seconds**
+  (9 days 17 h 4 min), across three resumable runs.
+* The forward traversal found **437,313,446,641 reachable reflection orbits** in
+  **25,554.4 seconds** (7 h 5 min 54 s), reaching a fixed point at traversal level 63.
+* The final version-3 reduced WDL+K table is **207,674,217,632 bytes**. SHA-256:
+  `b40ffd55b2d7c77334e5957f5e5b3003c76bf0d5120cc058924511a0c90d8b8c`.
+* The independent ZDD/DP count cross-check and structural self-tests pass. There is no
+  independent reference result or full-index table at this size, and a complete
+  fixpoint audit has not yet been run.
 
 ## Reflection reduction, reachability, and table formats
 
@@ -113,10 +137,10 @@ is the header updated. Interrupted work resumes from mode-specific `reach_work_*
 ./dobutsu reach --board 4x3 --threads 64
 ./dobutsu analyze --board 4x3       # now also prints reachability
 
-./dobutsu solve --board 7x3 --symmetry lr --threads 64 --ckpt 5
-./dobutsu reach --board 7x3 --symmetry lr --threads 64
-./dobutsu reach-audit --board 7x3 --symmetry lr
-./dobutsu info --board 7x3 --symmetry lr
+./dobutsu solve --board 8x3 --symmetry lr --threads 64 --ckpt 5
+./dobutsu reach --board 8x3 --symmetry lr --threads 64
+./dobutsu reach-audit --board 8x3 --symmetry lr
+./dobutsu info --board 8x3 --symmetry lr
 ```
 
 The C++ ZDD assigns separate ranks to left/right reflections. Consequently its 4×3 K plane
@@ -193,6 +217,7 @@ URL, byte size, and SHA-256 digest here after choosing the artifact host:
 | 5×3 reduced v3 | not published yet | `692ec9297bd028eb9b1e419a1670327c8a2db1773bdea57353ee9e62b8db7562` |
 | 6×3 reduced v3 | not published yet | `3e60fdd7c61873d98c8f0ed8d3a11445f3a2c80a4fcfb860cb027fb3715eaad1` |
 | 7×3 reduced v3 | not published yet | `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f` |
+| 8×3 reduced v3 | not published yet | `b40ffd55b2d7c77334e5957f5e5b3003c76bf0d5120cc058924511a0c90d8b8c` |
 
 Probe cells are row-major from row 0 (White/Gote's home, top) to row `ROWS-1` (Sente's
 home): `.` empty, `LEGCH` = Sente's Lion/Elephant/Giraffe/Chick/Hen, `legch` = Gote's.
