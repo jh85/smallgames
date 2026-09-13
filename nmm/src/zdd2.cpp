@@ -225,7 +225,9 @@ SweepResult sweepAndBuild(const Board& bd, const Zdd1& z1, int nMin, int nMax,
     out->nMin = nMin;
     out->nMax = nMax;
     out->paperFilter = paperFilter;
-    u64 maxNodes = z1.total > (1ull << 33) ? 1500000000ull : 80000000ull;
+    // >24-point boards (13/16MM variants) build ~2-3x the 12MM forests; keep ids < 2^32
+    u64 maxNodes = z1.total > (1ull << 33) ? (bd.m > 24 ? 3200000000ull : 1500000000ull)
+                                           : 80000000ull;
     int slotsLog = z1.total > (1ull << 33) ? 31 : 27;
     out->pool.init(maxNodes, slotsLog);
     blockRoots.assign(nStreams, std::vector<u32>(nBlocks, 0));

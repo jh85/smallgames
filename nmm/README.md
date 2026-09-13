@@ -124,6 +124,20 @@ distributed — only the truncated-band tooling that produces one.
   move loses in phases 2/3, 12/16MM full-board placement is a draw, unresolved cycles are
   draws (no repetition rule).
 
+## Twelve Men's Morris + center (custom, `--game 13`)
+
+Board 'g': the 12MM board plus a 25th point `CTR` connected to the four inner-ring
+midpoints (CN/CE/CS/CW), 44 edges. Mills are the 20 of 12MM plus the two through-center
+lines CN-CTR-CS and CE-CTR-CW (22 total); the (B,C,CTR) consecutive triples are
+deliberately not mills — the alternative 26-mill reading is a two-line change in
+`buildBoard` and yields a distinct `board_hash`. The center breaks the outer<->inner
+ring flip (its neighbors are inner-ring only), so the symmetry group is 8 (D4; the
+brute-force automorphism count in `test_board` confirms 8 is complete), while the 3-3
+mill-hypergraph group is 16. Full-board draw is off: 24 pieces never fill 25 points.
+Exact counts (`estimate --game 13`, reproduced independently by Burnside): 96,653,595,353
+phase-2/3 configs (largest subset 3,287,024,370), 503,870,139,148 placement states,
+697,177,329,854 total, 174.3 GB flat WDL — ~5.4x 12MM, solvable on the same machine.
+
 ## Sixteen Men's Morris (custom, stage-gated)
 
 Rules banner is printed at startup. The mill list (16 ring sides + 16 consecutive-triple

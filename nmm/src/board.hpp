@@ -4,6 +4,7 @@
 // ring 0 outermost. Boards with a center point put it at id = rings*8.
 // Games: 3 (board a: 1 ring + center), 5/6 (b: 2 rings, orthogonal spokes),
 // 7 (c: b + center), 9 (d: 3 rings, orthogonal spokes), 11/12 (e: 3 rings, all 8 spokes),
+// 13 (g: e + center connected to inner-ring midpoints; custom 12MM+center variant),
 // 16 (f: 4 rings, all 8 spokes; custom variant).
 #pragma once
 #include <cstdint>

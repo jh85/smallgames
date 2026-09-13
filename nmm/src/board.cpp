@@ -15,6 +15,11 @@ GameSpec gameSpec(int id, int sevenVariant) {
     case 9:  return {9,  'd', 3, false, false, 9,  true,  false, 16, 16, 32, 0};
     case 11: return {11, 'e', 3, false, true,  11, true,  false, 16, 20, 40, 0};
     case 12: return {12, 'e', 3, false, true,  12, true,  true,  16, 20, 40, 0};
+    // 13 = 12MM + center point (custom variant): board e + CTR connected to the four
+    // inner-ring midpoints. 24 pieces can never fill 25 points, so fullBoardDraw is off.
+    // Ring flip is not an automorphism (CTR's neighbors are inner-ring only) => 8 syms.
+    // Mills: the 20 of 12MM + the two through-center lines (CN-CTR-CS, CE-CTR-CW) = 22.
+    case 13: return {13, 'g', 3, true,  true,  12, true,  false, 8,  22, 44, 0};
     case 16: return {16, 'f', 4, false, true,  16, true,  true,  16, 32, 56, 0};
     default: throw std::runtime_error("unknown game");
   }
@@ -66,6 +71,16 @@ Board buildBoard(const GameSpec& spec) {
       for (int d = 1; d < 8; d += 2) addMill(0 * 8 + d, 1 * 8 + d, ctr);   // spoke+center
     if (spec.sevenMillVariant == 1 || spec.sevenMillVariant == 2)
       for (int d = 1; d < 4; d += 2) addMill(1 * 8 + d, ctr, 1 * 8 + d + 4); // through-center
+  } else if (spec.boardType == 'g') {
+    // 12MM+center: full 12MM spoke mills, plus the two lines through the center.
+    // Deliberately NOT mills: (B_d, C_d, CTR) triples — the center extends the four
+    // orthogonal lines but only the symmetric through-center triples count (approved
+    // 22-mill reading; the alternative 26-mill reading adds the four (B,C,CTR) mills).
+    for (int d = 0; d < 8; ++d)
+      for (int r = 0; r + 2 < R; ++r)
+        addMill(r * 8 + d, (r + 1) * 8 + d, (r + 2) * 8 + d);
+    for (int d = 1; d < 4; d += 2)
+      addMill((R - 1) * 8 + d, ctr, (R - 1) * 8 + d + 4);       // CN-CTR-CS, CE-CTR-CW
   } else if (!spec.center) {
     for (int d = 0; d < 8; ++d) {
       if (!spec.allSpokes && !(d & 1)) continue;
