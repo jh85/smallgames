@@ -1,14 +1,134 @@
-# morris — strong solver for N Men's Morris via two-ZDD indexing
+# morris — strong solver for the N Men's Morris family via two-ZDD indexing
 
 Implements and extends Takeda & Hoki, *"Analysis of the Number of Piece Configurations in
 N Men's Morris"* (IPSJ SIG-GI 2020-GI-43(8)): the paper's two-ZDD minimal perfect hash
 over unique, pseudo-reachable configurations, plus everything the paper does not cover —
-placement-phase indexing, atomic move generation, cyclic retrograde analysis, and packed
-WDL tables — for Twelve Men's Morris and a custom Sixteen Men's Morris stage-gated by an
-exact feasibility report.
+placement-phase indexing, atomic move generation, cyclic retrograde analysis, packed WDL
+tables, and a merged-phase (Lasker) solver. One generic engine; each game is a data entry.
 
 The paper and its English translation are not redistributed here; section and table
 references below point into them.
+
+## Games at a glance
+
+| `--game` | name | board | pts | edges | mills | syms | pieces | value (White first) |
+|---|---|---|---|---|---|---|---|---|
+| 3 | Three Men's Morris | a | 9 | 16 | 8 | 8 | 3 | **WIN** (validated vs flat solver) |
+| 5 | Five Men's Morris | b | 16 | 20 | 8 | 16 | 5 | index verified; not solved here |
+| 6 | Six Men's Morris | b | 16 | 20 | 8 | 16 | 6 | index verified; not solved here |
+| 7 | Seven Men's Morris | c | 17 | 24 | var. | 8 | 7 | index verified; not solved here |
+| 9 | Nine Men's Morris | d | 24 | 32 | 16 | 16 | 9 | **DRAW** (= Gasser 1996) |
+| 10 | Ten-piece 9MM (custom) | d | 24 | 32 | 16 | 16 | 10 | solve in progress |
+| 11 | Eleven Men's Morris | e | 24 | 40 | 20 | 16 | 11 | **WIN** |
+| 12 | Twelve Men's Morris | e | 24 | 40 | 20 | 16 | 12 | **WIN** |
+| 13 | 12MM + center (custom) | g | 25 | 44 | 22 | 8 | 12 | **WIN** |
+| 14 | Lasker Morris | d | 24 | 32 | 16 | 16 | 10 | solve pending (published: draw) |
+| 16 | Sixteen Men's Morris (custom) | f | 32 | 56 | 32 | 16 | 16 | stage-gated: infeasible on one machine |
+
+## Boards and connectivity
+
+Point naming: rings are lettered `A` (outermost) inward; each ring has 8 points at
+directions `NW N NE E SE S SW W` (point id = ring·8 + dir, `NW`=0 … `W`=7); a center
+point, where present, is `CTR` with id rings·8. Names like `ANW` (outer ring NW corner),
+`BN` (middle ring north midpoint), `CTR` are accepted by `query`. Every ring contributes
+its 8 perimeter edges; the boards differ in spokes and center:
+
+* **a** (3MM) — one ring plus `CTR` adjacent to **all 8** ring points. Mills: the 4 ring
+  sides plus the 4 straight lines through the center (8 total).
+* **b** (5/6MM) — two rings, spokes joining the rings at the four **orthogonal midpoints**
+  (`N E S W`). Mills: the 8 ring sides only (spokes have just 2 points).
+* **c** (7MM) — board b plus `CTR` connected to the four inner-ring midpoints. The
+  center-mill set is genuinely ambiguous in the sources; both candidate sets
+  (spoke+center `[A_d,B_d,CTR]`, through-center `[B_d,CTR,B_opp]`) are implemented and
+  selectable (`sevenMillVariant`); the paper reconciliation is in `docs/design.md`.
+* **d** (9/10/14MM) — three rings, orthogonal spokes `A–B–C` at `N E S W`. Mills: 12 ring
+  sides + 4 orthogonal spoke lines = 16. **No diagonals.**
+* **e** (11/12MM) — board d plus **diagonal spokes** at `NW NE SE SW` (so all 8 spoke
+  lines run `A–B–C`). Mills: 12 ring sides + 8 spoke lines = 20. Symmetries: the 8 of the
+  square × outer↔inner ring flip = 16.
+* **g** (13, custom) — board e plus `CTR` connected to the four **inner-ring orthogonal
+  midpoints** (`CN CE CS CW`) only; no diagonal center connections. Mills: the 20 of
+  board e plus the two through-center lines `CN–CTR–CS` and `CE–CTR–CW` = 22; the
+  `(B_d, C_d, CTR)` consecutive triples are deliberately **not** mills (the 26-mill
+  alternative reading is a two-line change and yields a distinct `board_hash`). The
+  center breaks the ring flip (its neighbors are all inner-ring), so only the 8 square
+  symmetries survive — confirmed complete by brute-force graph automorphism count.
+* **f** (16, custom) — four rings `A–D`, all 8 spokes between adjacent rings. Mills: 16
+  ring sides + 16 spoke triples of consecutive rings (`[A,B,C]` and `[B,C,D]` per spoke)
+  = 32. Symmetries: square × ring reversal (`A↔D, B↔C`) = 16.
+
+`config/morris<N>.json` is a generated dump of each board (points, names, edges, mills,
+symmetry permutations, board hash) written by the `board` test — documentation, not input.
+
+## Rules
+
+Common core (Gasser's conventions, as in the paper):
+
+* White moves first. **Placement**: while a player has pieces in hand, a turn places one
+  piece on any empty point. **Movement**: with an empty hand, a turn moves one own piece
+  to an adjacent empty point.
+* **Mills**: completing a line of three own pieces (by placement or movement) captures
+  exactly **one** opponent piece — a move that closes two mills still captures one. The
+  captured piece must not be in a complete mill unless *all* opponent pieces are in
+  mills. If the opponent has no piece on the board, the capture is skipped.
+* **Flying**: in games with flying, a player reduced to exactly 3 pieces moves to *any*
+  empty point instead of an adjacent one.
+* **Loss**: fewer than 3 pieces (movement phase), or no legal move.
+* **Draws**: unresolved cycles are draws (least-fixpoint semantics; no repetition rule).
+
+Per-game rule flags:
+
+| game | flying | full-board draw | phases | notes |
+|---|---|---|---|---|
+| 3, 5, 6 | no | – | split | board can never fill / classic small rules |
+| 7 | yes | – | split | center-mill variant selectable |
+| 9, 10, 11 | yes | – | split | board never fills (2N < points) |
+| 12, 16 | yes | **yes** | split | 2N = points: a full board at the end of placement is a draw |
+| 13 | yes | vacuous | split | 24 pieces never fill 25 points |
+| 14 (Lasker) | yes, **at 3 TOTAL** | vacuous | **merged** | see below |
+
+**Lasker Morris (game 14)** — rules per Gévay & Danner (arXiv:1408.0032) and Stahlhacke,
+pinned against the authors' published solver source:
+
+* 10 pieces per player on board d (no diagonals).
+* **Merged phases**: every turn is a free choice — place a piece from hand *or* move a
+  board piece — as long as the respective resource exists. Hands therefore diverge
+  arbitrarily, and side-to-move is stored explicitly.
+* **Flying at 3 total** (board + hand), not 3 on board: a player with 2 on the board and
+  1 in hand flies; a player with 3 on the board and pieces in hand does not.
+* Loss below 3 **total** pieces, or with no legal move. Captures as in the common core —
+  in particular the captureless-mill rule (empty opponent board) now occurs in live play.
+
+## State spaces
+
+Counts are **canonical** (symmetry-reduced by the applicable group; the 3-3 subsets of
+flying split-phase games use the larger mill-preserving group) and **pseudo-reachable**
+(the paper's filter removes configurations whose capture accounting is provably
+impossible; the remainder is a superset of the strictly reachable states). Placement
+counts are exact canonical counts — the filter never fires there. Total states =
+phase-2/3 configs × 2 (explicit side-to-move) + placement states (side-to-move implied by
+the hands). All figures below are exact, produced by the solves themselves and
+cross-checked against independent Burnside computations.
+
+| game | phase-2/3 configs | placement states | TOTAL states | tables on disk |
+|---|---:|---:|---:|---|
+| 9 | 7,673,755,215 | 17,874,891,168 | **33,222,401,598** | ~18 GB, 666 files |
+| 10 | ≤ 12,658,488,857 ¹ | 37,599,453,960 | ≈ 62.9 × 10⁹ ¹ | solve in progress |
+| 11 | 14,330,618,660 | 64,319,444,508 | **92,980,681,828** | 37 GB, 1,161 files |
+| 12 | 16,147,057,219 | 95,548,743,678 | **127,842,858,116** | 44 GB, 1,480 files |
+| 13 | 93,058,042,868 | 503,870,139,148 | **689,986,224,884** | 177 GB, 1,480 files |
+| 14 | merged: 133,466,246,771 configs × 2 stm | — | **266,932,493,542** ² | ~67 GB, ~3,600 files |
+| 16 | 111,964,137,872,598 ³ | 872,422,905,301,950 | **1,096,351,181,047,146** ³ | 274 TB — infeasible |
+
+¹ game 10 pre-filter canonical count; the exact filtered figure lands with the running solve.
+² game 14 uses the unfiltered index (the reachability filter is **unsound** under merged
+phases: a mill against an empty opponent board captures nothing, breaking the
+one-capture-per-mill-event accounting), so the table size equals the exact canonical
+count. This is 2× Gévay–Danner's published 133 bn (they drop black-to-move by
+color-swapping; we keep an explicit side bit).
+³ game 16 phase-2/3 figure is the pre-filter canonical count (`estimate --game 16`).
+
+For scale: the raw, non-symmetry-reduced spaces are ~16× (games 9–12, 14), ~8× (13) larger.
 
 ## Build & test
 
@@ -16,10 +136,14 @@ references below point into them.
 mkdir -p build && cd build && cmake .. && make -j && ctest
 ```
 
-Needs CMake ≥ 3.16, a C++20 compiler, and pthreads; builds `morris`, `cli_verify`, and the
-four test binaries (board, zdd1, counts, 3MM full validation). Tables are read and written
-under `data/m<game>/` **relative to the current working directory**, so the tree can be moved
-without editing source; `--dir D` overrides the location.
+Needs CMake ≥ 3.16, a C++20 compiler, and pthreads. Tests: board/symmetry integrity for
+every game (with brute-force automorphism cross-checks), ZDD1 round-trips, paper-count
+reproduction, full 3MM validation against an independent flat solver, Lasker move-generation
+rules, and a full end-to-end validation of the merged-phase solver on a miniature 4-piece
+Lasker game (81,860 states against an independent flat solver, 0 mismatches).
+
+Tables are read and written under `data/m<game>/` **relative to the current working
+directory**, so the tree can be moved without editing source; `--dir D` overrides.
 
 ## Commands
 
@@ -29,12 +153,14 @@ without editing source; `--dir D` overrides the location.
 ./build/morris estimate --game 16            # REQUIRED stage gate; exact Burnside counts
 ./build/morris solve --game 16               # refuses without --force (see estimate)
 ./build/morris nodecount-check --game 12     # paper's global ZDD2 reproduction
-./build/morris query --game 12 --white ANW,BN --black CE,... --hands 0,0
+./build/morris verify --game 12              # sampled retrograde-invariant audit (2M states)
+./build/morris query --game 12 --white ANW,BN --black CE --hands 0,0
+./build/morris query --game 14 --white ANW --black BN --hands 9,9 --stm 1   # merged: stm explicit
 ./build/cli_verify 9|11|12             # per-subset paper-table reproduction (NOFILTER=1
                                        #   reproduces the 12MM unique-only Table 10)
 ```
 
-## Generating the WDL tables (12MM)
+## Generating the WDL tables (12MM reference numbers)
 
 The tables are **not** stored in this repository — 12MM is 44 GiB. Everything needed to
 regenerate them is here:
@@ -56,9 +182,12 @@ for the full 12MM run, as measured on 2× EPYC 9115 / 64 threads / 723 GB RAM:
 | RAM | Dominated by the ZDD2 forests (497 M + 381 M nodes) plus the working partition |
 | Threads | `--threads N`, default = hardware concurrency |
 
-Output layout in `data/m12/`: `ph23_wWW_bBB.wdl` (100 phase-2/3 partitions),
-`place_Hhh_wWB_bBB.wdl` (1,378 placement layers), `zdd2_ph23.bin` and `zdd2_place.bin` (the
-two forests), and `MANIFEST.sha256`.
+Other measured solves on the same machine: 9MM ~4.5 h, 11MM ~7 h, 13 (12MM+center) ~34 h.
+
+Output layout in `data/m<game>/`: `ph23_wWW_bBB.wdl` (phase-2/3 partitions, rank × 2 stm),
+`place_Hhh_wWW_bBB.wdl` (placement layers, one hand pair per H), `zdd2_ph23.bin` /
+`zdd2_place.bin` (the forests), and — for merged-phase games — `mp_whWW_bhBB_wCC_bDD.wdl`
+partitions keyed by both hands and both board counts.
 
 ## Downloading and verifying the tables
 
@@ -97,9 +226,10 @@ distributed — only the truncated-band tooling that produces one.
   12MM Table 10 shown to be the *unique-only* counts (multinomial-symmetry proof); our
   filtered 12MM total is 16,147,057,219. 7MM 3-3 documented as an unresolved source
   anomaly; every other 7MM row exact with the 14-mill board.
-* 3-3 subsets of flying games use the mill-preserving group (order 48 on 3-ring boards);
-  this reproduces the paper/Gasser exactly and is proven value-preserving (both players
-  fly forever; adjacency is dead). Board group everywhere else, including all placement.
+* 3-3 subsets of flying split-phase games use the mill-preserving group (order 48 on
+  3-ring boards); this reproduces the paper/Gasser exactly and is proven value-preserving
+  (both players fly forever; adjacency is dead). Board group everywhere else, including
+  all placement and all merged-phase (Lasker) states.
 * ZDD1: 12MM count = 264,369,400,848 = the paper's "maximum integer". Node counts are
   canonical-minimal and differ from Table 11 (their variable order differs; functionally
   irrelevant, all round-trip tests exhaustive/randomized pass).
@@ -107,36 +237,33 @@ distributed — only the truncated-band tooling that produces one.
   convention) — structural reproduction.
 * 3MM strongly solved end-to-end and compared with an independent flat solver with its
   own hand-written rules: all 5,934 reachable states identical; initial value WIN.
+* Merged-phase solver validated the same way: a 4-piece merged game on the 3MM board
+  solved by both the real pipeline and an independent flat solver — 81,860 states,
+  0 mismatches — plus rule-level unit tests (place-or-move union, flying at 3 total,
+  capture-skip against an empty board).
+* 9MM initial value DRAW reproduces Gasser (1996); 11MM's phase-2/3 partitions match
+  12MM's shared partitions bitwise (the movement game depends only on the board).
 * Every ZDD2 build passes a hard integrity gate (per-subset counts vs sweep tally); an
   early lock-free hash-cons race was found this way and replaced with striped-lock
-  chaining.
+  chaining. Every finished solve passes a sampled retrograde-invariant audit
+  (2M states: WIN has a LOSS child; LOSS has all-WIN children; DRAW has a DRAW child
+  and no LOSS child; no unknowns).
 
 ## State model
 
 * Canonical black-free encoding: (white mask, black mask, white hand, black hand); White
-  moves first; side-to-move is derived during placement (white iff wh == bh) and explicit
-  in phase 2/3. Full state partitions: `ph23_wWW_bBB.wdl` (dense rank × 2 stm) and
-  `place_Hhh_wWB_bBB.wdl` (one hand pair per H = wh+bh; single acyclic sweep per layer).
+  moves first. Split-phase games: side-to-move is derived during placement (white iff
+  wh == bh) and explicit in phase 2/3; partitions `ph23_wWW_bBB.wdl` (dense rank × 2 stm)
+  and `place_Hhh_wWW_bBB.wdl` (one hand pair per H = wh+bh; single acyclic sweep per
+  layer). Merged-phase games: side-to-move is always explicit; partitions
+  `mp_whWW_bhBB_wCC_bDD.wdl` keyed (wh, bh, W, B), solved in ascending hand-sum then
+  ascending board-total order — placements strictly decrease the hand sum and captures
+  strictly decrease the board total, so cycles are confined to a single partition and
+  each partition runs the same double-buffered value iteration as phase 2/3.
 * WDL encoding: 2 bits/state — 00 unknown (construction only), 01 LOSS, 10 DRAW, 11 WIN,
-  side-to-move perspective. Rules per the paper + prompt: one capture per mill event
-  (double mills give one), captured piece not from a mill unless all are, capture skipped
-  if the opponent has no board piece, flying at exactly 3 pieces, <3 pieces or no legal
-  move loses in phases 2/3, 12/16MM full-board placement is a draw, unresolved cycles are
-  draws (no repetition rule).
-
-## Twelve Men's Morris + center (custom, `--game 13`)
-
-Board 'g': the 12MM board plus a 25th point `CTR` connected to the four inner-ring
-midpoints (CN/CE/CS/CW), 44 edges. Mills are the 20 of 12MM plus the two through-center
-lines CN-CTR-CS and CE-CTR-CW (22 total); the (B,C,CTR) consecutive triples are
-deliberately not mills — the alternative 26-mill reading is a two-line change in
-`buildBoard` and yields a distinct `board_hash`. The center breaks the outer<->inner
-ring flip (its neighbors are inner-ring only), so the symmetry group is 8 (D4; the
-brute-force automorphism count in `test_board` confirms 8 is complete), while the 3-3
-mill-hypergraph group is 16. Full-board draw is off: 24 pieces never fill 25 points.
-Exact counts (`estimate --game 13`, reproduced independently by Burnside): 96,653,595,353
-phase-2/3 configs (largest subset 3,287,024,370), 503,870,139,148 placement states,
-697,177,329,854 total, 174.3 GB flat WDL — ~5.4x 12MM, solvable on the same machine.
+  side-to-move perspective. Every table file carries a magic word, the board hash
+  (adjacency + mills + symmetries + rule flags), the state count, and its partition key,
+  so tables from different games or rule variants can never be misread.
 
 ## Sixteen Men's Morris (custom, stage-gated)
 
@@ -145,9 +272,9 @@ spoke mills) is compiled into `src/board.cpp`; `config/morris16.json` is a dump 
 written by the `board` test — the JSON files are generated documentation, not inputs.
 
 `estimate --game 16` (exact): 1.10 × 10¹⁵ states, 274 TB flat WDL, ≈ 544 machine-days here
-— the full solve therefore refuses to run without `--force`. The generic implementation, formats, and resumable
-solver support a future cluster run; exact truncated endgame solves (piece-count bands)
-are the supported alternative on this machine.
+— the full solve therefore refuses to run without `--force`. The generic implementation,
+formats, and resumable solver support a future cluster run; exact truncated endgame solves
+(piece-count bands, `endgame16 --maxpieces K`) are the supported alternative on this machine.
 
 ## RESULTS (solved 2026-08-01/02 on 2x EPYC 9115, 64 threads, 723 GB RAM)
 
@@ -176,18 +303,21 @@ independent solver on every reachable 3MM state.
   center adjacency and the through-center mills); outer/middle midpoints and the
   center itself only draw — the new point is not a winning first move, but it
   upgrades its four neighbors into winning ones.
+* Games 10 (ten-piece 9MM) and 14 (Lasker Morris) are solving / queued; results will be
+  recorded here. Lasker Morris has a published value (draw — Stahlhacke 2003, Gévay &
+  Danner 2016) that this solve must reproduce.
 
 ## Files
 
 | file | contents |
 |---|---|
 | `src/`, `CMakeLists.txt` | the solver: board/moves, two ZDD layers, retrograde solve, CLI |
-| `tests/` | board, ZDD1 round-trip, paper-count, and full 3MM validation tests |
+| `tests/` | board, ZDD1 round-trip, paper-count, 3MM and mini-Lasker full validations |
 | `config/*.json` | generated board dumps (points, edges, mills, symmetries) for reference |
 | `docs/design.md` | design notes and the full paper-table reconciliation |
-| `README.md` | results, rules, formats, build and command reference |
+| `README.md` | boards, rules, state spaces, results, formats, build and command reference |
 | `checksums/m12.SHA256SUMS` | per-file SHA-256 manifest for the externally published 12MM tables |
 
-The CMake build tree, run logs, and the generated `data/` tables are excluded by
+The CMake build trees, run logs, and the generated `data/` tables are excluded by
 `.gitignore`. The source paper, its English translation, and the coding-agent prompt used to
 produce this implementation are not redistributed here.
