@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -march=native -funroll-loops CMakeFiles/cli_verify.dir/src/cli_verify.cpp.o -o cli_verify  libmorris_zdd.a -lpthread libmorris_core.a 

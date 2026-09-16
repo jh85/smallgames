@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -march=native -funroll-loops CMakeFiles/test_3mm.dir/tests/test_3mm.cpp.o -o test_3mm  libmorris_solve.a -lpthread libmorris_zdd.a libmorris_core.a 

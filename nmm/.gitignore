@@ -1,5 +1,5 @@
 # CMake build tree and local build products
-/build/
+/build*/
 
 # Generated run and validation logs
 /*.log
