@@ -12,7 +12,7 @@ static int edgeCount(const Board& bd) {
 }
 
 int main() {
-  int games[] = {3, 5, 6, 7, 9, 10, 11, 12, 13, 16};
+  int games[] = {3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16};
   for (int g : games) {
     GameSpec sp = gameSpec(g, /*sevenVariant*/ 0);
     Board bd = buildBoard(sp);

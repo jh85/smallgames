@@ -37,10 +37,11 @@ struct Ctx {
 
   void prepare(bool build) {
     double t0 = nowS();
-    z23.build(bd.m, 3, sp.pieces);
+    // merged-phase games use only the unfiltered placement-style index (see solve.hpp)
+    if (!sp.mergedPhases) z23.build(bd.m, 3, sp.pieces);
     zp.build(bd.m, 0, sp.pieces);
     std::string p23 = dir + "/zdd2_ph23.bin", pp = dir + "/zdd2_place.bin";
-    if (!f23.load(p23, bd, z23)) {
+    if (!sp.mergedPhases && !f23.load(p23, bd, z23)) {
       if (!build) throw std::runtime_error("missing " + p23 + " (run build-zdds)");
       printf("[zdds] sweeping phase-2/3 domain (%llu configs)...\n",
              (unsigned long long)z23.total);
@@ -59,10 +60,15 @@ struct Ctx {
     u64 tot23 = 0, totp = 0;
     for (u64 c : f23.subsetCount) tot23 += c;
     for (u64 c : fp.subsetCount) totp += c;
-    printf("[zdds] ready in %.1fs: phase23 configs=%llu nodes=%llu | placement configs=%llu "
-           "nodes=%llu\n", nowS() - t0, (unsigned long long)tot23,
-           (unsigned long long)f23.pool.nnodes.load(), (unsigned long long)totp,
-           (unsigned long long)fp.pool.nnodes.load());
+    if (sp.mergedPhases)
+      printf("[zdds] ready in %.1fs: board configs=%llu nodes=%llu (merged phases: "
+             "single unfiltered index)\n", nowS() - t0, (unsigned long long)totp,
+             (unsigned long long)fp.pool.nnodes.load());
+    else
+      printf("[zdds] ready in %.1fs: phase23 configs=%llu nodes=%llu | placement "
+             "configs=%llu nodes=%llu\n", nowS() - t0, (unsigned long long)tot23,
+             (unsigned long long)f23.pool.nnodes.load(), (unsigned long long)totp,
+             (unsigned long long)fp.pool.nnodes.load());
     fflush(stdout);
   }
 };
@@ -140,6 +146,14 @@ int main(int argc, char** argv) {
     Solver sv;
     sv.bd = &bd; sv.z23 = &cx.z23; sv.f23 = &cx.f23; sv.zp = &cx.zp; sv.fp = &cx.fp;
     sv.N = sp.pieces; sv.threads = threads; sv.dir = dir;
+    if (sp.mergedPhases) {
+      double t0 = nowS();
+      sv.solveMerged();
+      printf("[solve] merged-phase solve complete in %.1fs\n", nowS() - t0);
+      printf("=== INITIAL POSITION VALUE (game %d, Lasker Morris, White moves first): "
+             "%s ===\n", game, VN[sv.initialValue]);
+      return 0;
+    }
     double t0 = nowS();
     sv.solvePhase23();
     printf("[solve] phase 2/3 complete in %.1fs\n", nowS() - t0);
@@ -188,12 +202,30 @@ int main(int argc, char** argv) {
     sscanf(handsS.c_str(), "%d,%d", &wh, &bh);
     int stm = (wh == bh) ? 0 : 1;   // during placement; with empty hands white implied? no:
     if (wh + bh == 0) stm = 0;      // caller may query either via swapping colors; document
+    // merged phases: hands do not determine stm — take it from --stm (default white)
+    if (sp.mergedPhases) {
+      stm = 0;
+      for (int i = 2; i < argc; ++i)
+        if (std::string(argv[i]) == "--stm" && i + 1 < argc) stm = atoi(argv[i + 1]) & 1;
+    }
     // value via file-backed tables
     auto fileVal = [&](u32 w2, u32 b2, int wh2, int bh2, int stm2) -> u32 {
       int W = __builtin_popcount(w2), B = __builtin_popcount(b2);
       char path[512];
       u64 idx;
-      if (wh2 + bh2 == 0) {
+      if (sp.mergedPhases) {
+        int ownT = stm2 ? B + bh2 : W + wh2, oppT = stm2 ? W + wh2 : B + bh2;
+        if (ownT < 3) return V_LOSS;
+        if (oppT < 3) return V_WIN;
+        u32 cw = w2, cb = b2;
+        bd.canonicalize(cw, cb);
+        u64 r1 = cx.zp.rank(cw, cb);
+        u64 k = r1 == UINT64_MAX ? UINT64_MAX : cx.fp.sel(W, B).selRank(r1);
+        if (k == UINT64_MAX) return V_UNK;
+        snprintf(path, sizeof path, "%s/mp_wh%02d_bh%02d_w%02d_b%02d.wdl", dir.c_str(),
+                 wh2, bh2, W, B);
+        idx = k * 2 + stm2;
+      } else if (wh2 + bh2 == 0) {
         if ((stm2 ? B : W) < 3) return V_LOSS;
         if ((stm2 ? W : B) < 3) return V_WIN;
         if (sp.fullBoardDraw && W + B == bd.m) return V_DRAW;
@@ -250,6 +282,55 @@ int main(int argc, char** argv) {
     Solver sv;
     sv.bd = &bd; sv.z23 = &cx.z23; sv.f23 = &cx.f23; sv.zp = &cx.zp; sv.fp = &cx.fp;
     sv.N = sp.pieces; sv.threads = threads; sv.dir = dir;
+    if (sp.mergedPhases) {
+      // same retrograde-invariant audit over the (wh,bh,W,B) merged partitions
+      if (!sv.loadMerged()) { fprintf(stderr, "tables missing\n"); return 1; }
+      u64 samples = 2000000, bad = 0, unk = 0, done = 0;
+      int nParts = 0;
+      for (int wh2 = 0; wh2 <= sp.pieces; ++wh2)
+        for (int bh2 = 0; bh2 <= sp.pieces; ++bh2)
+          for (int W = 0; W <= sp.pieces - wh2; ++W)
+            for (int B = 0; B <= sp.pieces - bh2; ++B)
+              if (W + wh2 >= 3 && B + bh2 >= 3) ++nParts;
+      std::mt19937_64 rng(7);
+      std::vector<Succ> buf;
+      for (int wh2 = 0; wh2 <= sp.pieces; ++wh2)
+        for (int bh2 = 0; bh2 <= sp.pieces; ++bh2)
+          for (int W = 0; W <= sp.pieces - wh2; ++W)
+            for (int B = 0; B <= sp.pieces - bh2; ++B) {
+              if (W + wh2 < 3 || B + bh2 < 3) continue;
+              Sel s = cx.fp.sel(W, B);
+              if (!s.count) continue;
+              u64 per = std::max<u64>(1, samples / nParts);
+              for (u64 t = 0; t < per; ++t) {
+                u64 k = rng() % s.count;
+                int stm = (int)(rng() & 1);
+                u32 w, b;
+                cx.zp.unrank(s.selUnrank(k), w, b);
+                u32 v = sv.mp[sv.midx(wh2, bh2, W, B)].get(k * 2 + stm);
+                if (v == V_UNK) { ++unk; continue; }
+                buf.clear();
+                genSuccessors(bd, w, b, wh2, bh2, stm, buf);
+                bool anyLoss = false, anyDraw = false, allWin = !buf.empty();
+                for (auto& sc : buf) {
+                  u32 cv = sv.lookupMerged(sc.w, sc.b, sc.wh, sc.bh, stm ^ 1);
+                  if (cv == V_LOSS) anyLoss = true;
+                  if (cv == V_DRAW) anyDraw = true;
+                  if (cv != V_WIN) allWin = false;
+                }
+                bool ok = (v == V_WIN && anyLoss) ||
+                          (v == V_LOSS && (buf.empty() || allWin)) ||
+                          (v == V_DRAW && !anyLoss && anyDraw);
+                if (!ok && ++bad < 6)
+                  printf("INVARIANT FAIL h=(%d,%d) %d-%d stm=%d k=%llu v=%s\n", wh2, bh2,
+                         W, B, stm, (unsigned long long)k, VN[v]);
+                ++done;
+              }
+            }
+      printf("[verify] %llu sampled states, %llu invariant failures, %llu unknown\n",
+             (unsigned long long)done, (unsigned long long)bad, (unsigned long long)unk);
+      return bad || unk ? 1 : 0;
+    }
     if (!sv.loadPhase23()) { fprintf(stderr, "tables missing\n"); return 1; }
     u64 samples = 2000000, bad = 0, unk = 0, done = 0;
     std::mt19937_64 rng(7);
@@ -323,6 +404,26 @@ int main(int argc, char** argv) {
       while (v) { buf[n2++] = (char)('0' + (int)(v % 10)); v /= 10; }
       for (int i = n2 - 1; i >= 0; --i) { putchar(buf[i]); if (i && i % 3 == 0) putchar(','); }
     };
+    if (sp.mergedPhases) {
+      // merged phases: states = sum over (W,B) of Nu(W,B) x valid hand pairs x 2 stm
+      u128 tot2 = 0, mx = 0;
+      for (int W = 0; W <= N; ++W)
+        for (int B = 0; B <= N; ++B) {
+          u128 nu = Nu(W, B);
+          if (2 * nu > mx) mx = 2 * nu;
+          int pairs = 0;
+          for (int wh = 0; wh <= N - W; ++wh)
+            for (int bh2 = 0; bh2 <= N - B; ++bh2)
+              if (W + wh >= 3 && B + bh2 >= 3) ++pairs;
+          tot2 += nu * (u128)pairs * 2;
+        }
+      printf("=== FEASIBILITY REPORT: game %d (Lasker / merged phases; canonical counts "
+             "exact) ===\n", game);
+      printf("  TOTAL states (x2 stm):            "); pr(tot2); printf("\n");
+      printf("  WDL bytes at 2 bits/state:        "); pr(tot2 / 4); printf("\n");
+      printf("  largest partition WDL (RAM, x2):  "); pr(mx * 2 / 4); printf(" bytes\n");
+      return 0;
+    }
     u128 ph = 0, phMax = 0, pl = 0;
     for (int w2 = 3; w2 <= N; ++w2)
       for (int b2 = 3; b2 <= N; ++b2) {

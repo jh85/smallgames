@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -march=native -funroll-loops CMakeFiles/test_lasker.dir/tests/test_lasker.cpp.o -o test_lasker  libmorris_core.a 

@@ -5,6 +5,7 @@
 // Games: 3 (board a: 1 ring + center), 5/6 (b: 2 rings, orthogonal spokes),
 // 7 (c: b + center), 9 (d: 3 rings, orthogonal spokes), 11/12 (e: 3 rings, all 8 spokes),
 // 13 (g: e + center connected to inner-ring midpoints; custom 12MM+center variant),
+// 14 (d: Lasker Morris — 10 pieces, merged place-or-move phases, flying at 3 total),
 // 16 (f: 4 rings, all 8 spokes; custom variant).
 #pragma once
 #include <cstdint>
@@ -25,6 +26,9 @@ struct GameSpec {
   bool fullBoardDraw;   // placement fills board => draw (12MM, 16MM)
   int expSyms, expMills, expEdges;
   int sevenMillVariant; // 7MM only: 0/1/2 candidate center-mill sets
+  // Lasker rule: every turn is place-from-hand OR move-a-board-piece (free choice while
+  // both are available); flying when board+hand total is 3. Off for all classic games.
+  bool mergedPhases = false;
 };
 
 struct Board {

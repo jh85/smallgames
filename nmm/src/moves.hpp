@@ -10,7 +10,11 @@
 //  - movement to adjacent empty points; a player with exactly 3 pieces flies (if the game
 //    has flying); mills formed by the move (i.e., complete mills through the destination)
 //    give one capture;
-//  - full-board placement (12/16MM) is a draw, detected by the solver via wb+bb == m.
+//  - full-board placement (12/16MM) is a draw, detected by the solver via wb+bb == m;
+//  - mergedPhases (Lasker): placement and movement are both available on every turn
+//    (each gated on its own resource), and flying triggers at 3 TOTAL pieces
+//    (board + hand) — for classic games hand==0 in the movement branch, so the same
+//    predicate reproduces the usual 3-on-board rule.
 #pragma once
 #include "board.hpp"
 #include <vector>
@@ -56,7 +60,7 @@ inline int genSuccessors(const Board& bd, u32 w, u32 b, int wh, int bh, int stm,
     }
   };
 
-  if (ownHand > 0) {   // placement
+  if (ownHand > 0) {   // placement (merged games fall through to movement as well)
     u32 t = empty;
     while (t) {
       u32 bit = t & (~t + 1);
@@ -72,8 +76,9 @@ inline int genSuccessors(const Board& bd, u32 w, u32 b, int wh, int bh, int stm,
       }
       emit(nown, opp, mill, stm ? 0 : -1, stm ? -1 : 0);
     }
-  } else {             // movement / flying
-    bool fly = bd.spec.flying && __builtin_popcount(own) == 3;
+  }
+  if (ownHand == 0 || bd.spec.mergedPhases) {   // movement / flying
+    bool fly = bd.spec.flying && __builtin_popcount(own) + ownHand == 3;
     u32 srcs = own;
     while (srcs) {
       u32 sbit = srcs & (~srcs + 1);

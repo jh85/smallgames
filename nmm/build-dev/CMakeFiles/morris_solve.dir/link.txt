@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmorris_solve.a CMakeFiles/morris_solve.dir/src/solve.cpp.o
+/usr/bin/ranlib libmorris_solve.a

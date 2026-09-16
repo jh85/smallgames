@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmorris_zdd.a CMakeFiles/morris_zdd.dir/src/zdd1.cpp.o CMakeFiles/morris_zdd.dir/src/zdd2.cpp.o
+/usr/bin/ranlib libmorris_zdd.a

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmorris_core.a CMakeFiles/morris_core.dir/src/board.cpp.o
+/usr/bin/ranlib libmorris_core.a

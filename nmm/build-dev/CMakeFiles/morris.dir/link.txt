@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -march=native -funroll-loops CMakeFiles/morris.dir/src/cli_main.cpp.o -o morris  libmorris_solve.a -lpthread libmorris_zdd.a libmorris_core.a 

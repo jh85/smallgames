@@ -23,6 +23,10 @@ GameSpec gameSpec(int id, int sevenVariant) {
     // Ring flip is not an automorphism (CTR's neighbors are inner-ring only) => 8 syms.
     // Mills: the 20 of 12MM + the two through-center lines (CN-CTR-CS, CE-CTR-CW) = 22.
     case 13: return {13, 'g', 3, true,  true,  12, true,  false, 8,  22, 44, 0};
+    // 14 = Lasker Morris: standard 9MM board, 10 pieces, merged phases (place or move
+    // every turn), flying at 3 TOTAL pieces (board+hand). Rules per Gévay-Danner
+    // (arXiv:1408.0032) / Stahlhacke; capture conventions are Gasser's, as everywhere.
+    case 14: return {14, 'd', 3, false, false, 10, true,  false, 16, 16, 32, 0, true};
     case 16: return {16, 'f', 4, false, true,  16, true,  true,  16, 32, 56, 0};
     default: throw std::runtime_error("unknown game");
   }
@@ -275,7 +279,8 @@ u64 Board::boardHash() const {
   for (u32 mk : millMask) mix(mk);
   for (auto& pm : perms)
     for (int p = 0; p < m; ++p) mix(pm[p]);
-  mix((u64)spec.pieces << 8 | (spec.flying ? 1 : 0) | (spec.fullBoardDraw ? 2 : 0));
+  mix((u64)spec.pieces << 8 | (spec.flying ? 1 : 0) | (spec.fullBoardDraw ? 2 : 0) |
+      (spec.mergedPhases ? 4 : 0));
   return h;
 }
 
@@ -284,8 +289,9 @@ void Board::writeConfigJson(const std::string& path) const {
   if (!f) throw std::runtime_error("cannot write " + path);
   fprintf(f, "{\n  \"game\": %d, \"board\": \"%c\", \"points\": %d, \"pieces\": %d,\n",
           spec.id, spec.boardType, m, spec.pieces);
-  fprintf(f, "  \"flying\": %s, \"full_board_draw\": %s,\n",
-          spec.flying ? "true" : "false", spec.fullBoardDraw ? "true" : "false");
+  fprintf(f, "  \"flying\": %s, \"full_board_draw\": %s, \"merged_phases\": %s,\n",
+          spec.flying ? "true" : "false", spec.fullBoardDraw ? "true" : "false",
+          spec.mergedPhases ? "true" : "false");
   fprintf(f, "  \"names\": [");
   for (int p = 0; p < m; ++p) fprintf(f, "%s\"%s\"", p ? "," : "", names[p].c_str());
   fprintf(f, "],\n  \"edges\": [");

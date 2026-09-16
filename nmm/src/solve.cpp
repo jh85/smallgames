@@ -222,6 +222,157 @@ void Solver::solvePlacement() {
   initialValue = plCur[0].get(0);
 }
 
+// Lasker (merged phases): see solve.hpp header comment for the partition argument.
+void Solver::solveMerged() {
+  mp.assign((N + 1) * (N + 1) * (N + 1) * (N + 1), WdlTable{});
+  struct MKey { int wh, bh, W, B; };
+  std::vector<MKey> order;
+  for (int s = 0; s <= 2 * N; ++s)
+    for (int wh = std::max(0, s - N); wh <= std::min(N, s); ++wh) {
+      int bh = s - wh;
+      for (int T = 0; T <= 2 * N; ++T)
+        for (int W = std::max(0, T - (N - bh)); W <= std::min(N - wh, T); ++W) {
+          int B = T - W;
+          // subspaces where a side's total is < 3 are terminal; no table needed
+          if (W + wh < 3 || B + bh < 3) continue;
+          order.push_back({wh, bh, W, B});
+        }
+    }
+  mkdir(dir.c_str(), 0755);
+  for (auto [wh, bh, W, B] : order) {
+    Sel selWB = fp->sel(W, B);
+    u64 n = selWB.count, states = n * 2;
+    u64 keyWord = (u64)wh << 24 | (u64)bh << 16 | (u64)W << 8 | (u64)B;
+    char path[512];
+    snprintf(path, sizeof path, "%s/mp_wh%02d_bh%02d_w%02d_b%02d.wdl", dir.c_str(), wh,
+             bh, W, B);
+    {  // resume: load if already solved
+      FILE* f = fopen(path, "rb");
+      if (f) {
+        u64 hdr[4];
+        if (fread(hdr, 8, 4, f) == 4 && hdr[0] == 0x4D4F5252574C4403ull &&
+            hdr[1] == bd->boardHash() && hdr[2] == states && hdr[3] == keyWord) {
+          WdlTable tab;
+          tab.n = states;
+          tab.bits.resize((states + 3) / 4);
+          if (fread(tab.bits.data(), 1, tab.bits.size(), f) == tab.bits.size()) {
+            mp[midx(wh, bh, W, B)] = std::move(tab);
+            fclose(f);
+            continue;
+          }
+        }
+        fclose(f);
+      }
+    }
+    WdlTable cur, nxt;
+    cur.init(states);
+    nxt.init(states);
+    double t0 = nowS();
+    int iters = 0;
+    // small partitions: skip thread spawns (there are thousands of tiny ones)
+    int nth = states >= (1u << 16) ? threads : 1;
+    for (;; ++iters) {
+      std::atomic<u64> changes{0}, chunk{0};
+      const u64 CH = 4096;
+      std::vector<std::thread> th;
+      for (int t = 0; t < nth; ++t)
+        th.emplace_back([&] {
+          std::vector<Succ> buf;
+          u64 ch;
+          u64 local = 0;
+          while ((ch = chunk.fetch_add(1)) * CH < states) {
+            u64 lo = ch * CH, hi = std::min(states, lo + CH);
+            for (u64 i = lo; i < hi; ++i) {
+              u32 v = cur.get(i);
+              if (v == V_WIN || v == V_LOSS || v == V_DRAW) { nxt.set(i, v); continue; }
+              u64 idx = i >> 1;
+              int stm = (int)(i & 1);
+              u64 r1 = selWB.selUnrank(idx);
+              u32 w, b;
+              zp->unrank(r1, w, b);
+              u32 nv = evalState(*bd, w, b, wh, bh, stm, [&](const Succ& sc) -> u32 {
+                int W2 = __builtin_popcount(sc.w), B2 = __builtin_popcount(sc.b);
+                int stm2 = stm ^ 1;
+                if (sc.wh == wh && sc.bh == bh && W2 == W && B2 == B) {
+                  // capture-free movement: same partition, previous iteration's buffer
+                  u32 cw = sc.w, cb = sc.b;
+                  bd->canonicalize(cw, cb);
+                  u64 k = selWB.selRank(zp->rank(cw, cb));
+                  return cur.get(k * 2 + stm2);
+                }
+                return lookupMerged(sc.w, sc.b, sc.wh, sc.bh, stm2);
+              }, buf);
+              nxt.set(i, nv);
+              if (nv != v) ++local;
+            }
+          }
+          changes += local;
+        });
+      for (auto& x : th) x.join();
+      std::swap(cur.bits, nxt.bits);
+      if (changes == 0) break;
+    }
+    // unresolved -> DRAW
+    u64 wCnt = 0, dCnt = 0, lCnt = 0;
+    for (u64 i = 0; i < states; ++i) {
+      u32 v = cur.get(i);
+      if (v == V_UNK) { cur.set(i, V_DRAW); v = V_DRAW; }
+      if (v == V_WIN) ++wCnt;
+      else if (v == V_DRAW) ++dCnt;
+      else ++lCnt;
+    }
+    mp[midx(wh, bh, W, B)] = std::move(cur);
+    {  // persist immediately (atomic rename)
+      char tmp[520];
+      snprintf(tmp, sizeof tmp, "%s.tmp", path);
+      FILE* f = fopen(tmp, "wb");
+      const WdlTable& tab = mp[midx(wh, bh, W, B)];
+      u64 hdr[4] = {0x4D4F5252574C4403ull, bd->boardHash(), tab.n, keyWord};
+      fwrite(hdr, 8, 4, f);
+      fwrite(tab.bits.data(), 1, tab.bits.size(), f);
+      fclose(f);
+      rename(tmp, path);
+    }
+    if (!quiet && states >= (1u << 20))
+      printf("[mp h=(%2d,%2d) %2d-%-2d] states=%llu iters=%d W/D/L=%llu/%llu/%llu (%.1fs)\n",
+             wh, bh, W, B, (unsigned long long)states, iters, (unsigned long long)wCnt,
+             (unsigned long long)dCnt, (unsigned long long)lCnt, nowS() - t0);
+    fflush(stdout);
+  }
+  // initial state: empty board, full hands, White to move
+  initialValue = mp[midx(N, N, 0, 0)].get(0);
+}
+
+bool Solver::loadMerged() {
+  mp.assign((N + 1) * (N + 1) * (N + 1) * (N + 1), WdlTable{});
+  for (int wh = 0; wh <= N; ++wh)
+    for (int bh = 0; bh <= N; ++bh)
+      for (int W = 0; W <= N - wh; ++W)
+        for (int B = 0; B <= N - bh; ++B) {
+          if (W + wh < 3 || B + bh < 3) continue;
+          char path[512];
+          snprintf(path, sizeof path, "%s/mp_wh%02d_bh%02d_w%02d_b%02d.wdl", dir.c_str(),
+                   wh, bh, W, B);
+          FILE* f = fopen(path, "rb");
+          if (!f) return false;
+          u64 hdr[4];
+          if (fread(hdr, 8, 4, f) != 4 || hdr[0] != 0x4D4F5252574C4403ull ||
+              hdr[1] != bd->boardHash()) {
+            fclose(f);
+            return false;
+          }
+          WdlTable& tab = mp[midx(wh, bh, W, B)];
+          tab.n = hdr[2];
+          tab.bits.resize((tab.n + 3) / 4);
+          if (fread(tab.bits.data(), 1, tab.bits.size(), f) != tab.bits.size()) {
+            fclose(f);
+            return false;
+          }
+          fclose(f);
+        }
+  return true;
+}
+
 void Solver::saveTables() const {
   mkdir(dir.c_str(), 0755);
   for (int W = 3; W <= N; ++W)

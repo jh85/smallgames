@@ -1,0 +1,14 @@
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/morris_core.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/morris_zdd.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_board.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_zdd1.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_counts.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/cli_verify.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/morris_solve.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_3mm.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_lasker.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test_lasker_solve.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/morris.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/test.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/edit_cache.dir
+/data1/nmm/smallgames/nmm/build-dev/CMakeFiles/rebuild_cache.dir
