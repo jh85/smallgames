@@ -13,6 +13,9 @@ GameSpec gameSpec(int id, int sevenVariant) {
     case 6:  return {6,  'b', 2, false, false, 6,  false, false, 16, 8,  20, 0};
     case 7:  return {7,  'c', 2, true,  false, 7,  true,  false, 8,  -1, 24, sevenVariant};
     case 9:  return {9,  'd', 3, false, false, 9,  true,  false, 16, 16, 32, 0};
+    // 10 = custom variant: standard 9MM board and phase rules with 10 pieces per side
+    // (NOT Lasker Morris, which merges the placement/movement phases; see game 14).
+    case 10: return {10, 'd', 3, false, false, 10, true,  false, 16, 16, 32, 0};
     case 11: return {11, 'e', 3, false, true,  11, true,  false, 16, 20, 40, 0};
     case 12: return {12, 'e', 3, false, true,  12, true,  true,  16, 20, 40, 0};
     // 13 = 12MM + center point (custom variant): board e + CTR connected to the four
