@@ -160,6 +160,23 @@ Verification: sampled retrograde-invariant audit clean (2M states, 0 failures, 0
 unknowns); mirror partitions bitwise-consistent; the identical pipeline matches an
 independent solver on every reachable 3MM state.
 
+## RESULTS (solved 2026-09-14/16, same machine)
+
+* **NINE MEN'S MORRIS IS A DRAW** — reproduces Gasser (1996) end-to-end with this
+  independent pipeline; ground-truth validation of the whole stack. Solve ~4.5 h,
+  tables ~18 GB (666 files). Audit: 2M samples, 0 failures, 0 unknowns.
+* **ELEVEN MEN'S MORRIS IS A FIRST-PLAYER WIN** — the diagonal spokes decide the game
+  even with 11-piece hands. Solve ~7 h, tables 37 GB (1,161 files). Audit clean; every
+  phase-2/3 partition shared with 12MM matched its W/D/L tallies exactly.
+* **TWELVE MEN'S MORRIS + CENTER (game 13) IS A FIRST-PLAYER WIN** — 25 points, 22
+  mills, 8 symmetries; 697.2G states, ~5.4x 12MM. Solve ~34 h (forests 3.3 h + phase
+  2/3 20.9 h + placement 12.2 h at 64 threads, once each across an interrupted run);
+  tables 177 GB (1,480 files). Audit: 2M samples, 0 failures, 0 unknowns. First
+  placements: all corner points win AND the inner-ring midpoints win (they gain the
+  center adjacency and the through-center mills); outer/middle midpoints and the
+  center itself only draw — the new point is not a winning first move, but it
+  upgrades its four neighbors into winning ones.
+
 ## Files
 
 | file | contents |
