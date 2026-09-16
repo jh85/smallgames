@@ -191,28 +191,34 @@ partitions keyed by both hands and both board counts.
 
 ## Downloading and verifying the tables
 
-The 12MM tables are hosted outside this repository as one `m12.tar.zst` archive: a 12.5 GiB
-download that expands to 44 GiB. The overall ratio is 3.5× — the packed WDL partitions
-compress far better than that, but the two ZDD2 forests are 14 GiB of node structure and
-barely compress at all.
+The finished WDL tables are published as one `zstd` tar archive per game in the
+Hugging Face dataset **[eii/nmm](https://huggingface.co/datasets/eii/nmm)**. The packed
+WDL partitions compress well; the ZDD2 forests are raw node structure and barely
+compress, which sets the overall ratios.
 
-| board | archive | expands to | SHA-256 of archive | download |
-|---|---|---|---|---|
-| 12MM | 13,373,076,822 B | 46,892,638,927 B | `09ef5659cec657e935c92ece04cb94769cb45076026e264e704c3d394faf45f6` | not published yet |
+| board | archive | expands to | SHA-256 of archive |
+|---|---|---|---|
+| [m9.tar.zst](https://huggingface.co/datasets/eii/nmm/resolve/main/m9.tar.zst) | 7,464,750,584 B | ~18 GiB | `57a5523e8f8599df2a64e88d608b524f7dda214ad48d7270216e2236242238fa` |
+| [m11.tar.zst](https://huggingface.co/datasets/eii/nmm/resolve/main/m11.tar.zst) | 12,759,236,368 B | ~37 GiB | `d0a3cd7a8be8e93280d944fe2dafa6b00eafa41532fe410dba82d80f7c223545` |
+| [m12.tar.zst](https://huggingface.co/datasets/eii/nmm/resolve/main/m12.tar.zst) | 13,373,076,822 B | 46,892,638,927 B | `09ef5659cec657e935c92ece04cb94769cb45076026e264e704c3d394faf45f6` |
+| [m13.tar.zst](https://huggingface.co/datasets/eii/nmm/resolve/main/m13.tar.zst) | 41,878,630,235 B | ~177 GiB | `e6d18bd2f96870de341bc5ba541dfdc09e4c05cdbf9eda4f18cae28279de3433` |
 
-Extract from this directory, which recreates `data/m12/` where the solver expects it:
+Extract from this directory, which recreates `data/m<game>/` where the solver expects it
+(for example 12MM):
 
 ```
 tar --zstd -xf m12.tar.zst          # or: curl -sL <url> | tar --zstd -xf -
 cd data/m12 && sha256sum -c MANIFEST.sha256
 ```
 
-The archive ships with its own `MANIFEST.sha256` covering all 1,480 files; the same list is
-committed here as [`checksums/m12.SHA256SUMS`](checksums/m12.SHA256SUMS), so you can verify
-an extracted copy against the repository rather than against the download itself. Every one
-of those 1,480 digests was re-checked against the on-disk tables before publication.
+The 12MM archive ships with its own `MANIFEST.sha256` covering all 1,480 files; the same
+list is committed here as [`checksums/m12.SHA256SUMS`](checksums/m12.SHA256SUMS), so you
+can verify an extracted copy against the repository rather than against the download
+itself. Every one of those 1,480 digests was re-checked against the on-disk tables before
+publication. For the other games, verify the downloaded archive against the SHA-256 in
+the table above (the same digests Hugging Face stores as the LFS object ids).
 
-The archive is made with `zstd -12 --long=27 -T0`; the 128 MiB window is exactly zstd's
+The archives are made with `zstd -12 --long=27 -T0`; the 128 MiB window is exactly zstd's
 default decoder limit, so stock `tar --zstd -xf` works with **no extra flags**.
 
 **16MM is not published.** The full 16MM solve is infeasible here (see below) and the
