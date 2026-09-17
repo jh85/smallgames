@@ -27,6 +27,11 @@ references below point into them.
 
 ## Boards and connectivity
 
+| board d — 9MM / ten-piece / Lasker | board e — 11MM / 12MM | board g — 12MM + center |
+|:---:|:---:|:---:|
+| ![board d: three rings, orthogonal spokes only](docs/img/layout_m9.png) | ![board e: board d plus diagonal spokes](docs/img/layout_m12.png) | ![board g: board e plus a center point joined to the four inner-ring midpoints](docs/img/layout_m13.png) |
+| 24 points, 32 edges, 16 mills | 24 points, 40 edges, 20 mills | 25 points, 44 edges, 22 mills |
+
 Point naming: rings are lettered `A` (outermost) inward; each ring has 8 points at
 directions `NW N NE E SE S SW W` (point id = ring·8 + dir, `NW`=0 … `W`=7); a center
 point, where present, is `CTR` with id rings·8. Names like `ANW` (outer ring NW corner),
