@@ -18,7 +18,7 @@ references below point into them.
 | 6 | Six Men's Morris | b | 16 | 20 | 8 | 16 | 6 | index verified; not solved here |
 | 7 | Seven Men's Morris | c | 17 | 24 | var. | 8 | 7 | index verified; not solved here |
 | 9 | Nine Men's Morris | d | 24 | 32 | 16 | 16 | 9 | **DRAW** (= Gasser 1996) |
-| 10 | Ten-piece 9MM (custom) | d | 24 | 32 | 16 | 16 | 10 | solve in progress |
+| 10 | Ten-piece 9MM (custom) | d | 24 | 32 | 16 | 16 | 10 | **DRAW** |
 | 11 | Eleven Men's Morris | e | 24 | 40 | 20 | 16 | 11 | **WIN** |
 | 12 | Twelve Men's Morris | e | 24 | 40 | 20 | 16 | 12 | **WIN** |
 | 13 | 12MM + center (custom) | g | 25 | 44 | 22 | 8 | 12 | **WIN** |
@@ -113,20 +113,19 @@ cross-checked against independent Burnside computations.
 | game | phase-2/3 configs | placement states | TOTAL states | tables on disk |
 |---|---:|---:|---:|---|
 | 9 | 7,673,755,215 | 17,874,891,168 | **33,222,401,598** | ~18 GB, 666 files |
-| 10 | ≤ 12,658,488,857 ¹ | 37,599,453,960 | ≈ 62.9 × 10⁹ ¹ | solve in progress |
+| 10 | 11,523,312,220 | 37,599,453,960 | **60,646,078,400** | 27 GB, 891 files |
 | 11 | 14,330,618,660 | 64,319,444,508 | **92,980,681,828** | 37 GB, 1,161 files |
 | 12 | 16,147,057,219 | 95,548,743,678 | **127,842,858,116** | 44 GB, 1,480 files |
 | 13 | 93,058,042,868 | 503,870,139,148 | **689,986,224,884** | 177 GB, 1,480 files |
-| 14 | merged: 133,466,246,771 configs × 2 stm | — | **266,932,493,542** ² | ~67 GB, ~3,600 files |
-| 16 | 111,964,137,872,598 ³ | 872,422,905,301,950 | **1,096,351,181,047,146** ³ | 274 TB — infeasible |
+| 14 | merged: 133,466,246,771 configs × 2 stm | — | **266,932,493,542** ¹ | ~67 GB, ~3,600 files |
+| 16 | 111,964,137,872,598 ² | 872,422,905,301,950 | **1,096,351,181,047,146** ² | 274 TB — infeasible |
 
-¹ game 10 pre-filter canonical count; the exact filtered figure lands with the running solve.
-² game 14 uses the unfiltered index (the reachability filter is **unsound** under merged
+¹ game 14 uses the unfiltered index (the reachability filter is **unsound** under merged
 phases: a mill against an empty opponent board captures nothing, breaking the
 one-capture-per-mill-event accounting), so the table size equals the exact canonical
 count. This is 2× Gévay–Danner's published 133 bn (they drop black-to-move by
 color-swapping; we keep an explicit side bit).
-³ game 16 phase-2/3 figure is the pre-filter canonical count (`estimate --game 16`).
+² game 16 phase-2/3 figure is the pre-filter canonical count (`estimate --game 16`).
 
 For scale: the raw, non-symmetry-reduced spaces are ~16× (games 9–12, 14), ~8× (13) larger.
 
@@ -309,9 +308,12 @@ independent solver on every reachable 3MM state.
   center adjacency and the through-center mills); outer/middle midpoints and the
   center itself only draw — the new point is not a winning first move, but it
   upgrades its four neighbors into winning ones.
-* Games 10 (ten-piece 9MM) and 14 (Lasker Morris) are solving / queued; results will be
-  recorded here. Lasker Morris has a published value (draw — Stahlhacke 2003, Gévay &
-  Danner 2016) that this solve must reproduce.
+* **TEN-PIECE NINE MEN'S MORRIS (game 10, custom) IS A DRAW** — the extra piece per
+  side does not change 9MM's character. Solve ~7.5 h, tables 27 GB (891 files). Audit:
+  2M samples, 0 failures, 0 unknowns. The reachability filter trims 9.0% here
+  (11,523,312,220 of 12,658,488,857 canonical phase-2/3 configs survive).
+* Game 14 (Lasker Morris) is solving; its published value (draw — Stahlhacke 2003,
+  Gévay & Danner 2016) is the reproduction target and will be recorded here.
 
 ## Files
 
