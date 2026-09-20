@@ -22,7 +22,7 @@ references below point into them.
 | 11 | Eleven Men's Morris | e | 24 | 40 | 20 | 16 | 11 | **WIN** |
 | 12 | Twelve Men's Morris | e | 24 | 40 | 20 | 16 | 12 | **WIN** |
 | 13 | 12MM + center (custom) | g | 25 | 44 | 22 | 8 | 12 | **WIN** |
-| 14 | Lasker Morris | d | 24 | 32 | 16 | 16 | 10 | solve pending (published: draw) |
+| 14 | Lasker Morris | d | 24 | 32 | 16 | 16 | 10 | **DRAW** (= Stahlhacke 2003) |
 | 16 | Sixteen Men's Morris (custom) | f | 32 | 56 | 32 | 16 | 16 | stage-gated: infeasible on one machine |
 
 ## Boards and connectivity
@@ -122,7 +122,7 @@ cross-checked against independent Burnside computations.
 | 11 | 14,330,618,660 | 64,319,444,508 | **92,980,681,828** | 37 GB, 1,161 files |
 | 12 | 16,147,057,219 | 95,548,743,678 | **127,842,858,116** | 44 GB, 1,480 files |
 | 13 | 93,058,042,868 | 503,870,139,148 | **689,986,224,884** | 177 GB, 1,480 files |
-| 14 | merged: 133,466,246,771 configs × 2 stm | — | **266,932,493,542** ¹ | ~67 GB, ~3,600 files |
+| 14 | merged: 133,466,246,771 configs × 2 stm | — | **266,932,493,542** ¹ | 68 GB, 3,601 files |
 | 16 | 111,964,137,872,598 ² | 872,422,905,301,950 | **1,096,351,181,047,146** ² | 274 TB — infeasible |
 
 ¹ game 14 uses the unfiltered index (the reachability filter is **unsound** under merged
@@ -317,8 +317,12 @@ independent solver on every reachable 3MM state.
   side does not change 9MM's character. Solve ~7.5 h, tables 27 GB (891 files). Audit:
   2M samples, 0 failures, 0 unknowns. The reachability filter trims 9.0% here
   (11,523,312,220 of 12,658,488,857 canonical phase-2/3 configs survive).
-* Game 14 (Lasker Morris) is solving; its published value (draw — Stahlhacke 2003,
-  Gévay & Danner 2016) is the reproduction target and will be recorded here.
+* **LASKER MORRIS (game 14) IS A DRAW** — reproduces Stahlhacke (2003) and Gévay &
+  Danner (2016) with the merged-phase solver: second independent ground-truth
+  validation of the pipeline, and the first exercising merged phases, explicit
+  side-to-move, diverging hands, and flying-at-3-total at full scale. Solve ~77 h
+  across 3,600 (hands, board-counts) partitions; tables 68 GB (3,601 files). Audit:
+  ~2M samples, 0 failures, 0 unknowns.
 
 ## Files
 
