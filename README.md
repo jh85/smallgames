@@ -55,6 +55,12 @@ combinatorial games.
   second-player win and 5×4 a first-player win as in the literature, while 4×5 comes
   out a **second-player win**, contradicting Table I of the paper — the validation
   evidence is documented in the project README.
+- [Oware](oware/README.md) — a C++20 layered retrograde solver for 6×2 Oware under the
+  OpenSpiel/Abapa rules, over all 889,063,398,405 positions with a ZDD-style perfect-hash
+  index. Because a repetition is scored by row ownership, the game's value is
+  history-dependent; the table stores the seeds each side can *force* and labels every state
+  WIN / LOSS / DRAW or `DRAW*` (decided only by the repetition rule). Move generator
+  validated against OpenSpiel on 2 million transitions.
 
 Generated tables are kept out of git and published separately; each project's README
 records how to regenerate them and the SHA-256 digests to verify a download against.
