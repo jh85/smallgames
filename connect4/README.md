@@ -100,12 +100,12 @@ that is precisely why the slabs still match. Every build also verifies its per-p
 counts against the independent counting DP before saving. So compare rebuilt slabs against
 `checksums/`, but expect a locally rebuilt `zdd.bin` to differ from the published one.
 
-| board | files | total size | notes |
-|---|---|---|---|
-| 4×4 | 17 | 150,944 B | instant; `--brute` cross-check feasible |
-| 6×4 | 25 | 22,212,456 B | second-player win |
-| 5×5 | 26 | 20,637,575 B | draw |
-| 7×6 | 43 | 660,138,684,135 B (615 GiB) | build 27 s + solve 8.9 h on 64 threads |
+| board | state space (pseudo-legal non-terminal positions) | files | total size | notes |
+|---|---:|---:|---:|---|
+| 4×4 | 147,319 | 17 | 150,944 B | instant; `--brute` cross-check feasible |
+| 6×4 | 70,538,337 | 25 | 22,212,456 B | second-player win |
+| 5×5 | 52,213,470 | 26 | 20,637,575 B | draw |
+| 7×6 | 2,637,477,442,337 | 43 | 660,138,684,135 B (615 GiB) | build 27 s + solve 8.9 h on 64 threads |
 
 For the full 7×6 run:
 
@@ -119,35 +119,32 @@ For the full 7×6 run:
 
 The tables are hosted outside this repository. Each board is published as one
 `c4_wdl_<W>x<H>.tar.zst` archive holding the whole board directory. The WDL data compresses
-7.4×, so 7×6 is an 83 GiB download that expands to 615 GiB.
+about 5.1×, so 7×6 is a 121 GiB download that expands to 615 GiB.
 
 | board | archive | expands to | SHA-256 of archive | download |
 |---|---|---|---|---|
-| 4×4 | 58,914 B | 150,944 B | `9c78714b6b42b2591c5ea08bc086d9f5d237368ac019da991d436b8a0605fe7c` | not published yet |
-| 5×5 | 8,465,218 B | 20,637,575 B | `7fe5840723bdd538845a17ba88ee8cf1dccad41db3b67d3a72dc73160e18a312` | not published yet |
-| 6×4 | 7,524,475 B | 22,212,456 B | `242787a3f393685d0202f7787534643edcde2c08db0f3c48d0b1c660a4824567` | not published yet |
-| 7×6 | 89,216,767,476 B | 660,138,684,135 B | `2a79d7a429d59a346c2bbf3fdb84afd9620fe70236d363f5f42f87b37064a79e` | not published yet |
+| 4×4 | 60,410 B | 150,944 B | `3a821d960a03cac28733a2cd3d409729e14156401131cc360b2623d848ab57f5` | [Hugging Face](https://huggingface.co/datasets/eii/connect4/resolve/main/c4_wdl_4x4.tar.zst?download=true) |
+| 5×5 | 9,181,148 B | 20,637,575 B | `3dfef541c9a6d0106b3ede3a9c5759501368af5b210ea3a54316631191e30743` | [Hugging Face](https://huggingface.co/datasets/eii/connect4/resolve/main/c4_wdl_5x5.tar.zst?download=true) |
+| 6×4 | 8,878,048 B | 22,212,456 B | `89175d720be47d09205fd8f2aa06c08a8724221ea343ee073dfc579c11dcc6a9` | [Hugging Face](https://huggingface.co/datasets/eii/connect4/resolve/main/c4_wdl_6x4.tar.zst?download=true) |
+| 7×6 | 129,585,865,603 B | 660,138,684,135 B | `b677bf3afa874f29d99ae1c2613d2dfe9854b3f6b13cceadd403cc0fad0866ab` | [Hugging Face](https://huggingface.co/datasets/eii/connect4/resolve/main/c4_wdl_7x6.tar.zst?download=true) |
 
 Extract into this directory, which recreates `c4_wdl_<W>x<H>/` where the solver expects it:
 
 ```
-echo "2a79d7a429d59a346c2bbf3fdb84afd9620fe70236d363f5f42f87b37064a79e  c4_wdl_7x6.tar.zst" \
+echo "b677bf3afa874f29d99ae1c2613d2dfe9854b3f6b13cceadd403cc0fad0866ab  c4_wdl_7x6.tar.zst" \
   | sha256sum -c -
 tar --zstd -xf c4_wdl_7x6.tar.zst
 ```
 
 Or stream it, which never stores the archive — useful for 7×6, since it needs only the
-615 GiB of extracted output rather than 615 + 83:
+615 GiB of extracted output rather than 615 + 121:
 
 ```
-curl -sL <url> | tar --zstd -xf -
+curl -fL 'https://huggingface.co/datasets/eii/connect4/resolve/main/c4_wdl_7x6.tar.zst?download=true' \
+  | tar --zstd -xf -
 ```
 
-The archives are made with `zstd -12 --long=27 -T0`. The 128 MiB window is exactly zstd's
-default decoder limit, so stock `tar --zstd -xf` and `zstd -d` work with **no extra flags**.
-`--long=31` compresses ~10% better, but its 2 GiB window exceeds that limit: every downloader
-would have to pass `--long=31` or `--memory=2048MB`, and plain `tar --zstd -xf` fails with
-"Frame requires too much memory for decoding". Not worth 10%.
+The published archives unpack with stock `tar --zstd -xf` and `zstd -d`.
 
 After extracting, `checksums/` holds a `sha256sum`-format manifest per board that verifies
 the files individually — worth running on the 7×6 set, and the way to tell *which* slab is
@@ -167,14 +164,14 @@ from the side to move's perspective).
 
 ```
 cd <parent of c4_wdl_7x6>
-tar -cf - c4_wdl_7x6 | zstd -q -12 --long=27 -T0 -o c4_wdl_7x6.tar.zst
+tar --zstd -cf c4_wdl_7x6.tar.zst c4_wdl_7x6
 ```
 
-7×6 takes ~34 min on 64 threads. To check an archive's contents without unpacking 615 GiB to
-disk, stream each member through `sha256sum` and diff the result against the manifest:
+To check an archive's contents without unpacking 615 GiB to disk, stream each member
+through `sha256sum` and diff the result against the manifest:
 
 ```
-zstd -dc --long=27 c4_wdl_7x6.tar.zst \
+zstd -dc c4_wdl_7x6.tar.zst \
   | tar -xf - --to-command='sh -c "sha256sum | sed \"s|-\$|\$TAR_FILENAME|\""' \
   | sed 's|  .*/|  |' | sort -k2 -V | diff - checksums/c4_wdl_7x6.SHA256SUMS
 ```
