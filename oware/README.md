@@ -148,7 +148,7 @@ initial position: first player forces >= 23 (or fewer), second player forces >= 
 Neither player can force even 24 of the 48 seeds by self-terminating play; every line that
 avoids losing runs into a repetition, whose outcome depends on the history (see
 [What the table means](#what-the-table-means--read-this-first)). The tables are 516 GB in
-48 files (`SHA256SUMS` alongside them); they are not in git.
+48 files (digests in `checksums/`); they are not in git.
 
 Share of boards whose score is exact (`gM + gN = n`, i.e. clamped to the levels that matter):
 
@@ -178,6 +178,9 @@ and score split.
 seeds (18 are needed for a draw by score, 19 to win). 41.7 % of the boards of the top layer
 are exact, against 30.3 % for the 48-seed game.
 
+A plan for the 7×2 game with 42 seeds (3 per pit; 4.16 × 10¹² boards, 2.36 TB of tables,
+more than fits in RAM) is in [7x2_42_out_of_core_plan.md](7x2_42_out_of_core_plan.md).
+
 ### 7×2, 28 seeds (2 per pit)
 
 `build/solve7 <outdir> 28`: 39,080,213,240 boards in layers 0–26 and 28 (the count matches
@@ -187,8 +190,8 @@ the 6×2 games the opening already matters: `probe7` reports that three of the s
 moves (pits 1, 2 and 3) lose by force, pit 6 captures 6 seeds at once, and the other three
 keep the draw. 54.6 % of the top layer's boards are exact.
 
-SHA-256 digests of the 36-seed and 7×2 tables are in [checksums/](checksums/); the 48-seed
-digests will be added when computed.
+SHA-256 digests of all three table sets (48 layer files + `stats.txt` each) are in
+[checksums/](checksums/).
 
 ## References
 
