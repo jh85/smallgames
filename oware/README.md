@@ -82,16 +82,24 @@ twelve table lookups. Unlike N Men's Morris there is no board symmetry to quotie
 ```sh
 make            # build/solve, build/probe, build/tests, build/xcheck, build/explore*
 make test
-numactl --interleave=all build/solve <outdir> [maxN=48] [threads]
+numactl --interleave=all build/solve <outdir> [seeds=48] [threads=all] [maxN=seeds]
 build/probe <outdir> s0 s1 ... s11 captured0 captured1 side_to_move
 ```
 
-`solve` needs about 600 GB of RAM for the full run and writes one `oware_nNN.lh` file per
-layer plus `stats.txt` (per layer and score split: win / loss / forced draw / `DRAW*`
-counts). It restarts from the finished layers found in `<outdir>`.
+`solve` needs about 600 GB of RAM for the full 48-seed run and writes one `oware_nNN.lh`
+file per layer plus `stats.txt` (per layer and score split: win / loss / forced draw /
+`DRAW*` counts). It restarts from the finished layers found in `<outdir>`.
 
-`probe` takes the OpenSpiel pit numbering (P0 owns pits 0–5, P1 owns 6–11), memory-maps only
-the layers it needs, and prints the value of the position and of every legal move.
+`seeds` is the total number of seeds (even, at most 48): 48 is standard Oware with 4 seeds
+per pit, 36 is the 3-per-pit variant, and so on. The rules are otherwise unchanged and a
+majority (`seeds/2 + 1`) of the seeds wins; the value clamp and the layer skipped for "a
+single seed can never be captured" follow from `seeds`. Each layer file records the seed
+count in its header (files from before this field was added are 48-seed files), so a table
+cannot be read as the wrong game. Use a separate `<outdir>` per variant.
+
+`probe` takes the OpenSpiel pit numbering (P0 owns pits 0–5, P1 owns 6–11), infers the
+game's seed count from the state (pits plus captured seeds), memory-maps only the layers it
+needs, and prints the value of the position and of every legal move.
 
 ### File format
 

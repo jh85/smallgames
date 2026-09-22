@@ -2,7 +2,10 @@
 // the board, producing per-board sound guarantees (see layer.hpp) from which the
 // win/draw/loss value of every (board, scores, side to move) state follows.
 //
-//   solve <outdir> [maxN=48] [threads]
+//   solve <outdir> [seeds=48] [threads=all] [maxN=seeds]
+//
+// seeds is the total number of seeds in the game (4 per pit = 48 for standard Oware,
+// 3 per pit = 36, ...); the rules are otherwise unchanged and seeds/2+1 captures win.
 //
 // Layers are solved in increasing n; a capture leads to a strictly smaller layer, so
 // each layer only needs the finished smaller ones plus a fixpoint inside the layer.
@@ -24,7 +27,7 @@
 using namespace oware;
 
 static Index IX;
-static Layer L[SEEDS + 1];
+static Layer L[MAX_SEEDS + 1];
 static std::string outDir;
 static const uint64_t BLOCK_WORDS = 3 * 1024;  // 196,608 boards; divisible by 2, 3, 8
 
@@ -98,7 +101,7 @@ static bool loadLayer(int n) {
   FileHeader h;
   Layer& ly = L[n];
   bool ok = fread(&h, sizeof h, 1, fp) == 1 && !memcmp(h.magic, "OWARELH1", 8) && h.n == n &&
-            h.size == ly.size && h.P == ly.P && h.mode == ly.finalMode();
+            headerSeedsMatch(h) && h.size == ly.size && h.P == ly.P && h.mode == ly.finalMode();
   if (ok) {
     ly.alloc(h.mode);
     ok = h.bytes == ly.bytes;
@@ -122,7 +125,7 @@ static void saveLayer(int n) {
   FileHeader h{};
   memcpy(h.magic, "OWARELH1", 8);
   h.n = n; h.A = ly.A; h.V = ly.V; h.P = ly.P; h.mode = ly.mode; h.G = ly.G; h.w = ly.w;
-  h.size = ly.size; h.bytes = ly.bytes;
+  h.seeds = SEEDS; h.size = ly.size; h.bytes = ly.bytes;
   bool ok = fwrite(&h, sizeof h, 1, fp) == 1;
   for (uint64_t done = 0; ok && done < ly.bytes;) {
     uint64_t chunk = std::min<uint64_t>(ly.bytes - done, 1ull << 30);
@@ -240,15 +243,16 @@ static void solveLayer(int n) {
   std::string sp = outDir + "/stats.txt";
   FILE* fs = fopen(sp.c_str(), "a");
   fprintf(fs, "layer %d size %" PRIu64 " exact %" PRIu64 " solve_s %.1f verify_s %.1f\n", n, size, exact, t1 - t0, now() - t1);
-  int cmin = std::max(0, 24 - n), cmax = std::min(24, 48 - n);
+  const int win = winSeeds(), half = win - 1;
+  int cmin = std::max(0, half - n), cmax = std::min(half, SEEDS - n);
   for (int c = cmin; c <= cmax; ++c) {  // c = seeds already captured by the side to move
-    int c2 = 48 - n - c;
+    int c2 = SEEDS - n - c;
     uint64_t W = 0, Lo = 0, Dx = 0, Dc = 0;
     for (int p = 0; p < ly.P; ++p) {
       int gm = ly.gM(p), gn = ly.gN(p);
-      if (c + gm >= 25) W += hist[p];
-      else if (c2 + gn >= 25) Lo += hist[p];
-      else if (c + gm == 24 && c2 + gn == 24) Dx += hist[p];
+      if (c + gm >= win) W += hist[p];
+      else if (c2 + gn >= win) Lo += hist[p];
+      else if (c + gm == half && c2 + gn == half) Dx += hist[p];
       else Dc += hist[p];
     }
     fprintf(fs, "  n %d mover_captured %d other_captured %d win %" PRIu64 " loss %" PRIu64 " draw_forced %" PRIu64 " draw_cycle %" PRIu64 "\n",
@@ -260,29 +264,40 @@ static void solveLayer(int n) {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [maxN=48] [threads]\n"); return 1; }
+  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [seeds=48] [threads=all] [maxN=seeds]\n"); return 1; }
   outDir = argv[1];
-  int maxN = argc > 2 ? atoi(argv[2]) : SEEDS;
-  if (argc > 3) omp_set_num_threads(atoi(argv[3]));
+  SEEDS = argc > 2 ? atoi(argv[2]) : MAX_SEEDS;
+  if (SEEDS < 2 || SEEDS > MAX_SEEDS || SEEDS % 2) {
+    fprintf(stderr, "seeds must be even and between 2 and %d\n", MAX_SEEDS); return 1;
+  }
+  if (argc > 3 && atoi(argv[3]) > 0) omp_set_num_threads(atoi(argv[3]));
+  int maxN = argc > 4 ? std::min(atoi(argv[4]), SEEDS) : SEEDS;
+  const int win = winSeeds();
+  printf("solving %d-seed Oware (%d captured seeds win) into %s\n", SEEDS, win, outDir.c_str());
   mkdir(outDir.c_str(), 0775);
   for (int n = 0; n <= maxN; ++n) {
-    if (n == 47) continue;  // a single seed can never be captured
+    if (n == SEEDS - 1) continue;  // a single seed can never be captured
     L[n].describe(n, IX.layerSize(n));
     if (loadLayer(n)) { printf("layer %2d: loaded\n", n); fflush(stdout); continue; }
     solveLayer(n);
   }
-  if (maxN == SEEDS) {
+  if (maxN == SEEDS && SEEDS % PITS == 0) {
     Board init, c;
-    memset(init.p, 4, PITS);
+    memset(init.p, SEEDS / PITS, PITS);
     int M = 0, N = 99;
     for (int i = 0; i < ROW; ++i) {
-      play(init, i, c);
-      int p = L[48].get(IX.rank(c, 48));
-      M = std::max(M, L[48].gN(p)); N = std::min(N, L[48].gM(p));
+      int cap = play(init, i, c);  // the first move can capture with 1 or 2 seeds per pit
+      const Layer& lc = L[SEEDS - cap];
+      int p = lc.get(IX.rank(c, SEEDS - cap));
+      M = std::max(M, cap + lc.gN(p)); N = std::min(N, lc.gM(p));
     }
-    const char* v = M >= 25 ? "FIRST-PLAYER WIN" : N >= 25 ? "SECOND-PLAYER WIN" : (M == 24 && N == 24) ? "DRAW (forced 24-24)" : "DRAW (no forced win)";
+    char v[64];
+    if (M >= win) snprintf(v, sizeof v, "FIRST-PLAYER WIN");
+    else if (N >= win) snprintf(v, sizeof v, "SECOND-PLAYER WIN");
+    else if (M == win - 1 && N == win - 1) snprintf(v, sizeof v, "DRAW (forced %d-%d)", win - 1, win - 1);
+    else snprintf(v, sizeof v, "DRAW (no forced win)");
     printf("initial position: first player forces >= %d%s, second player forces >= %d%s: %s\n",
-           M, M <= 23 ? " (or fewer)" : "", N, N <= 23 ? " (or fewer)" : "", v);
+           M, M < win - 1 ? " (or fewer)" : "", N, N < win - 1 ? " (or fewer)" : "", v);
   }
   return 0;
 }

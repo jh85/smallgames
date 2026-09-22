@@ -3,6 +3,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include "layer.hpp"
 #include "oware.hpp"
 using namespace oware;
 
@@ -47,8 +48,19 @@ int main() {
 
   Index ix;
   unsigned __int128 tot = 0;
-  for (int n = 0; n <= SEEDS; ++n) if (n != 47) tot += ix.layerSize(n);
+  for (int n = 0; n <= MAX_SEEDS; ++n) if (n != 47) tot += ix.layerSize(n);
   CHECK(uint64_t(tot) + 1 == 889063398406ull);  // Romein & Bal's Awari position count
+
+  // Value clamping for the standard game and for a 36-seed (3 per pit) variant.
+  CHECK(Layer::lowA(24) == 0 && Layer::numV(24) == 25);
+  CHECK(Layer::lowA(25) == 0 && Layer::numV(25) == 26);
+  CHECK(Layer::lowA(48) == 23 && Layer::numV(48) == 3);
+  SEEDS = 36;
+  CHECK(winSeeds() == 19);
+  CHECK(Layer::lowA(18) == 0 && Layer::numV(18) == 19);
+  CHECK(Layer::lowA(19) == 0 && Layer::numV(19) == 20);
+  CHECK(Layer::lowA(36) == 17 && Layer::numV(36) == 3);
+  SEEDS = MAX_SEEDS;
 
   for (int n = 0; n <= 9; ++n) {
     uint64_t sz = ix.layerSize(n);

@@ -8,8 +8,9 @@
 // the board's score is exact.
 //
 // Only thresholds that decide some legal score split matter for win/draw/loss, so
-// for n > 24 the guarantees are clamped to [A, A+V-1] with A = n-25, V = 51-n
-// (code 0 = "at most A", code V-1 = "at least 25").  For n <= 24 they are stored
+// with W = SEEDS/2+1 seeds needed to win, for n >= W the guarantees are clamped to
+// [A, A+V-1] with A = n-W, V = SEEDS+3-n (code 0 = "at most A", code V-1 = "at
+// least W"); for 48 seeds that is A = n-25, V = 51-n.  For n < W they are stored
 // raw (A = 0, V = n+1).  A pair of codes (eM, eN) always satisfies eM+eN <= V-1 and
 // is stored as one triangular index p in [0, P), P = V(V+1)/2.
 #pragma once
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "oware.hpp"
 
 namespace oware {
 
@@ -38,8 +40,8 @@ struct Layer {
   static int lowA(int) { return 0; }
   static int numV(int n) { return n + 1; }
 #else
-  static int lowA(int n) { return n > 24 ? n - 25 : 0; }
-  static int numV(int n) { return n > 24 ? 51 - n : n + 1; }
+  static int lowA(int n) { return n >= winSeeds() ? n - winSeeds() : 0; }
+  static int numV(int n) { return n >= winSeeds() ? SEEDS + 3 - n : n + 1; }
 #endif
 
   void describe(int n_, uint64_t size_) {
@@ -103,7 +105,7 @@ struct Layer {
       default: { uint16_t v = uint16_t(newp); memcpy(data + 2 * i, &v, 2); }
     }
   }
-  // Guarantees in seeds (lower bounds; code 0 for n > 24 only says "<= A").
+  // Guarantees in seeds (lower bounds; code 0 for n >= W only says "<= A").
   int gM(int p) const { return A + decM[p]; }
   int gN(int p) const { return A + decN[p]; }
   int clampCode(int g) const { int e = g - A; return e < 0 ? 0 : e >= V ? V - 1 : e; }
@@ -111,9 +113,14 @@ struct Layer {
 
 struct FileHeader {
   char magic[8];  // "OWARELH1"
-  int32_t n, A, V, P, mode, G, w, pad;
+  int32_t n, A, V, P, mode, G, w;
+  int32_t seeds;  // total seeds of the game; 0 in files written before it was recorded (= 48)
   uint64_t size, bytes;
 };
+
+inline bool headerSeedsMatch(const FileHeader& h) {
+  return h.seeds == SEEDS || (h.seeds == 0 && SEEDS == MAX_SEEDS);
+}
 
 inline std::string layerPath(const std::string& dir, int n) {
   char buf[64]; snprintf(buf, sizeof buf, "/oware_n%02d.lh", n);

@@ -13,7 +13,14 @@
 
 namespace oware {
 
-constexpr int PITS = 12, ROW = 6, SEEDS = 48;
+constexpr int PITS = 12, ROW = 6, MAX_SEEDS = 48;
+
+// Seeds in the game being solved (standard Oware: 4 per pit = 48).  Set once at
+// startup from the command line (solve) or from the queried state (probe); every
+// table below is sized for MAX_SEEDS and valid for any smaller total.
+inline int SEEDS = MAX_SEEDS;
+// Captured seeds needed to win: a majority of SEEDS.  SEEDS must be even.
+inline int winSeeds() { return SEEDS / 2 + 1; }
 
 struct Board {
   uint8_t p[PITS];
@@ -150,25 +157,25 @@ class Index {
   }
 
  private:
-  uint32_t cntA_[SEEDS + 1], cntZ_[SEEDS + 1];
-  uint64_t base_[SEEDS + 1][SEEDS + 2];
-  uint32_t preA_[ROW][SEEDS + 1][SEEDS + 2];
-  uint32_t preZ_[ROW][SEEDS + 1][2][SEEDS + 2];
+  uint32_t cntA_[MAX_SEEDS + 1], cntZ_[MAX_SEEDS + 1];
+  uint64_t base_[MAX_SEEDS + 1][MAX_SEEDS + 2];
+  uint32_t preA_[ROW][MAX_SEEDS + 1][MAX_SEEDS + 2];
+  uint32_t preZ_[ROW][MAX_SEEDS + 1][2][MAX_SEEDS + 2];
   std::vector<uint64_t> rowA_, rowZ_;
-  size_t offA_[SEEDS + 2], offZ_[SEEDS + 2];
+  size_t offA_[MAX_SEEDS + 2], offZ_[MAX_SEEDS + 2];
 };
 
 inline Index::Index() {
   // paths[j][r][f]: accepting paths of the six-pit diagram from node (pit j,
   // r seeds left, zero-seen flag f).  Accept at j==6 iff r==0 (and f for Z).
-  static uint32_t pa[ROW + 1][SEEDS + 1], pz[ROW + 1][SEEDS + 1][2];
-  for (int r = 0; r <= SEEDS; ++r) {
+  static uint32_t pa[ROW + 1][MAX_SEEDS + 1], pz[ROW + 1][MAX_SEEDS + 1][2];
+  for (int r = 0; r <= MAX_SEEDS; ++r) {
     pa[ROW][r] = r == 0;
     pz[ROW][r][0] = 0;
     pz[ROW][r][1] = r == 0;
   }
   for (int j = ROW - 1; j >= 0; --j)
-    for (int r = 0; r <= SEEDS; ++r) {
+    for (int r = 0; r <= MAX_SEEDS; ++r) {
       pa[j][r] = 0;
       for (int a = 0; a <= r; ++a) pa[j][r] += pa[j + 1][r - a];
       for (int f = 0; f < 2; ++f) {
@@ -177,7 +184,7 @@ inline Index::Index() {
       }
     }
   for (int j = 0; j < ROW; ++j)
-    for (int r = 0; r <= SEEDS; ++r) {
+    for (int r = 0; r <= MAX_SEEDS; ++r) {
       preA_[j][r][0] = 0;
       for (int a = 0; a <= r; ++a) preA_[j][r][a + 1] = preA_[j][r][a] + pa[j + 1][r - a];
       for (int f = 0; f < 2; ++f) {
@@ -186,25 +193,25 @@ inline Index::Index() {
           preZ_[j][r][f][a + 1] = preZ_[j][r][f][a] + pz[j + 1][r - a][f | (a == 0)];
       }
     }
-  for (int k = 0; k <= SEEDS; ++k) {
+  for (int k = 0; k <= MAX_SEEDS; ++k) {
     cntA_[k] = pa[0][k];
     cntZ_[k] = pz[0][k][0];
   }
-  for (int n = 0; n <= SEEDS; ++n) {
+  for (int n = 0; n <= MAX_SEEDS; ++n) {
     base_[n][0] = 0;
     for (int k = 0; k <= n; ++k)
       base_[n][k + 1] = base_[n][k] + uint64_t(cntZ_[k]) * cntA_[n - k];
   }
   // Enumerate compositions in lexicographic (= rank) order.
   size_t ta = 0, tz = 0;
-  for (int k = 0; k <= SEEDS; ++k) {
+  for (int k = 0; k <= MAX_SEEDS; ++k) {
     offA_[k] = ta; offZ_[k] = tz;
     ta += cntA_[k]; tz += cntZ_[k];
   }
-  offA_[SEEDS + 1] = ta; offZ_[SEEDS + 1] = tz;
+  offA_[MAX_SEEDS + 1] = ta; offZ_[MAX_SEEDS + 1] = tz;
   rowA_.resize(ta);
   rowZ_.resize(tz);
-  for (int k = 0; k <= SEEDS; ++k) {
+  for (int k = 0; k <= MAX_SEEDS; ++k) {
     size_t ia = offA_[k], iz = offZ_[k];
     uint8_t c[ROW];
     for (c[0] = 0; c[0] <= k; ++c[0])
