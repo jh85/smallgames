@@ -25,7 +25,7 @@ static int search(const Board& b, int n, uint64_t idx, int alpha, int beta) {
   // captures first
   Board c;
   struct Mv { int cap; Board c; };
-  Mv mv[6]; int nm = 0;
+  Mv mv[ROW]; int nm = 0;
   for (int i = 0; i < ROW; ++i) if (m >> i & 1) { mv[nm].cap = play(b, i, mv[nm].c); ++nm; }
   for (int q = 0; q < nm; ++q) if (mv[q].cap) {
     uint64_t ci = IX.rank(mv[q].c, n - mv[q].cap);

@@ -1,9 +1,9 @@
 // Query the Oware table.
 //
-//   probe <dir> s0 s1 ... s11 captured0 captured1 side_to_move
+//   probe <dir> s0 s1 ... s(PITS-1) captured0 captured1 side_to_move
 //
-// Pits and players are indexed as in oware_6x2_paper_rules.md (P0 owns 0..5, P1 owns
-// 6..11).  The total of the 14 seed counts is the game's seed count (48 for standard
+// Pits and players are indexed as in oware_6x2_paper_rules.md (P0 owns 0..ROW-1, P1
+// owns ROW..PITS-1).  The total of all seed counts is the game's seed count (48 for standard
 // Oware) and must match the table in <dir>.  Prints the value for the side to move and
 // for each legal move:
 //   WIN / LOSS   forced, under the real rules, from a fresh repetition history
@@ -72,16 +72,16 @@ static const char* verdict(int cM, int cN, int gM, int gN) {
 }
 
 int main(int argc, char** argv) {
-  if (argc != 17) { fprintf(stderr, "usage: probe <dir> s0..s11 captured0 captured1 side_to_move\n"); return 1; }
+  if (argc != PITS + 5) { fprintf(stderr, "usage: probe <dir> s0..s%d captured0 captured1 side_to_move\n", PITS - 1); return 1; }
   dir = argv[1];
   int s[PITS], cap[2], stm, tot = 0;
   for (int j = 0; j < PITS; ++j) tot += s[j] = atoi(argv[2 + j]);
-  cap[0] = atoi(argv[14]); cap[1] = atoi(argv[15]); stm = atoi(argv[16]);
+  cap[0] = atoi(argv[PITS + 2]); cap[1] = atoi(argv[PITS + 3]); stm = atoi(argv[PITS + 4]);
   SEEDS = tot + cap[0] + cap[1];
   if (SEEDS < 2 || SEEDS > MAX_SEEDS || SEEDS % 2 || (stm != 0 && stm != 1)) { fprintf(stderr, "invalid state\n"); return 1; }
   const int win = winSeeds();
   Board b;
-  for (int j = 0; j < PITS; ++j) b.p[j] = uint8_t(s[(j + 6 * stm) % PITS]);
+  for (int j = 0; j < PITS; ++j) b.p[j] = uint8_t(s[(j + ROW * stm) % PITS]);
   int cM = cap[stm], cN = cap[1 - stm], gM, gN;
   guarantees(b, tot, gM, gN);
   printf("side to move P%d: %s  (can force a final score >= %d, opponent can force >= %d;\n"
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
     int k = play(b, i, c), cm, cn;
     guarantees(c, tot - k, cm, cn);
     // after the move the opponent is the mover of c
-    printf("  pit %2d: captures %2d -> %s\n", i + 6 * stm, k, verdict(cM + k, cN, cn, cm));
+    printf("  pit %2d: captures %2d -> %s\n", i + ROW * stm, k, verdict(cM + k, cN, cn, cm));
   }
   return 0;
 }

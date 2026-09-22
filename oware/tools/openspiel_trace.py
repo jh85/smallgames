@@ -1,7 +1,9 @@
 """Dump random OpenSpiel Oware transitions for cross-checking src/oware.hpp (see xcheck.cpp).
 
-Each line: 12 seeds, captured0, captured1, side to move, legal-action mask, action,
-then the successor's 12 seeds, captured0, captured1 and a terminal flag.
+    openspiel_trace.py <games> <rng seed> [houses per player=6] [seeds per house=4]
+
+Each line: the 2*houses seed counts, captured0, captured1, side to move, legal-action
+mask, action, then the successor's seed counts, captured0, captured1 and a terminal flag.
 """
 import random
 import sys
@@ -22,8 +24,10 @@ def parse(state):
 
 def main():
     games, seed = int(sys.argv[1]), int(sys.argv[2])
+    houses = int(sys.argv[3]) if len(sys.argv) > 3 else 6
+    per_house = int(sys.argv[4]) if len(sys.argv) > 4 else 4
     rng = random.Random(seed)
-    game = pyspiel.load_game("oware")
+    game = pyspiel.load_game(f"oware(num_houses_per_player={houses},num_seeds_per_house={per_house})")
     for _ in range(games):
         s = game.new_initial_state()
         while not s.is_terminal():

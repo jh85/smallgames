@@ -1,10 +1,11 @@
-// Oware 6x2 rules on mover-normalised boards, and the perfect-hash position index.
+// Oware rules on mover-normalised boards, and the perfect-hash position index,
+// for a board of ROW pits per player (ROW = 6 is standard Oware).
 //
-// A Board always has the side to move owning pits 0..5 and the opponent owning
-// pits 6..11; sowing advances (i+1) mod 12.  After a move the board is rotated by
-// six pits so the new side to move again owns 0..5.  This is the P0/P1 game of
-// oware_6x2_paper_rules.md seen from the mover's side (the rules are symmetric
-// under that rotation).
+// A Board always has the side to move owning pits 0..ROW-1 and the opponent owning
+// pits ROW..2*ROW-1; sowing advances (i+1) mod PITS.  After a move the board is
+// rotated by ROW pits so the new side to move again owns 0..ROW-1.  This is the
+// P0/P1 game of oware_6x2_paper_rules.md seen from the mover's side (the rules are
+// symmetric under that rotation).
 #pragma once
 #include <array>
 #include <cstdint>
@@ -13,7 +14,14 @@
 
 namespace oware {
 
-constexpr int PITS = 12, ROW = 6, MAX_SEEDS = 48;
+#ifndef OWARE_ROW
+#define OWARE_ROW 6
+#endif
+constexpr int ROW = OWARE_ROW, PITS = 2 * ROW;
+static_assert(ROW >= 2 && ROW <= 8, "a row is packed into one uint64");
+// Largest seed total the index tables are built for: 4 per pit on the standard board,
+// 3 per pit on wider ones (the row tables grow as C(MAX_SEEDS + ROW, ROW)).
+constexpr int MAX_SEEDS = ROW == 6 ? 48 : 6 * ROW;
 
 // Seeds in the game being solved (standard Oware: 4 per pit = 48).  Set once at
 // startup from the command line (solve) or from the queried state (probe); every
@@ -32,7 +40,7 @@ struct Board {
   int total() const { return rowSum(0) + rowSum(ROW); }
 };
 
-// Legal pit choices for the mover (rules section 3).  Returns a 6-bit mask.
+// Legal pit choices for the mover (rules section 3).  Returns a ROW-bit mask.
 inline int legalMask(const Board& b) {
   int m = 0;
   if (b.rowSum(ROW) > 0) {
@@ -40,7 +48,7 @@ inline int legalMask(const Board& b) {
       if (b.p[i]) m |= 1 << i;
   } else {
     for (int i = 0; i < ROW; ++i)
-      if (b.p[i] > 5 - i) m |= 1 << i;  // must reach the opponent's row
+      if (b.p[i] > ROW - 1 - i) m |= 1 << i;  // must reach the opponent's row
   }
   return m;
 }
@@ -54,11 +62,11 @@ inline int play(const Board& b, int i, Board& out) {
   int s = t[i];
   t[i] = 0;
   int pos = i;
-  if (s >= 11) {  // full laps: every other pit gets one seed per lap
-    int laps = s / 11;
+  if (s >= PITS - 1) {  // full laps: every other pit gets one seed per lap
+    int laps = s / (PITS - 1);
     for (int j = 0; j < PITS; ++j)
       if (j != i) t[j] += laps;
-    s -= laps * 11;
+    s -= laps * (PITS - 1);
     if (!s) pos = i == 0 ? PITS - 1 : i - 1;  // a whole number of laps ends just before i
   }
   while (s) {
@@ -88,12 +96,12 @@ inline int play(const Board& b, int i, Board& out) {
 // Position index.
 //
 // The indexed set for n seeds on the board is every board whose opponent row
-// (pits 6..11) contains at least one empty pit.  The player who just moved
+// (pits ROW..PITS-1) contains at least one empty pit.  The player who just moved
 // emptied the pit they sowed from and sowing skips that pit, so every position
 // that arises after a move is in the set; the set is closed under play().  The
-// only reachable position outside it is the initial one.  Summed over n = 0..46
-// and 48 this gives 889,063,398,405 positions (+1 for the initial position =
-// the 889,063,398,406 of Romein & Bal 2003).
+// only reachable position outside it is the initial one.  For 6x2 with 48 seeds,
+// summed over n = 0..46 and 48 this gives 889,063,398,405 positions (+1 for the
+// initial position = the 889,063,398,406 of Romein & Bal 2003).
 //
 // The index is a minimal perfect hash obtained exactly as in Takeda & Hoki's
 // first ZDD: a layered decision diagram over the pits whose node label is
@@ -101,7 +109,7 @@ inline int play(const Board& b, int i, Board& out) {
 // stores its number of accepting paths and the rank of a path is the sum of
 // the counts of the branches it skipped.  Because the opponent row and the
 // mover row only interact through their sums, the diagram factors into two
-// six-pit diagrams and the rank is
+// ROW-pit diagrams and the rank is
 //     base[n][k] + rankZ(opp row, k) * count(n-k) + rank(mover row, n-k)
 // where k is the opponent row sum.
 // ---------------------------------------------------------------------------
@@ -141,7 +149,7 @@ class Index {
     ro = uint32_t(idx / cntA_[n - k]);
     rm = uint32_t(idx % cntA_[n - k]);
   }
-  // Row tables: every composition in rank order, 6 bytes packed in a uint64.
+  // Row tables: every composition in rank order, ROW bytes packed in a uint64.
   const uint64_t* rowsA(int k) const { return &rowA_[offA_[k]]; }
   const uint64_t* rowsZ(int k) const { return &rowZ_[offZ_[k]]; }
   uint32_t cntA(int k) const { return cntA_[k]; }
@@ -166,8 +174,8 @@ class Index {
 };
 
 inline Index::Index() {
-  // paths[j][r][f]: accepting paths of the six-pit diagram from node (pit j,
-  // r seeds left, zero-seen flag f).  Accept at j==6 iff r==0 (and f for Z).
+  // paths[j][r][f]: accepting paths of the ROW-pit diagram from node (pit j,
+  // r seeds left, zero-seen flag f).  Accept at j==ROW iff r==0 (and f for Z).
   static uint32_t pa[ROW + 1][MAX_SEEDS + 1], pz[ROW + 1][MAX_SEEDS + 1][2];
   for (int r = 0; r <= MAX_SEEDS; ++r) {
     pa[ROW][r] = r == 0;
@@ -213,18 +221,21 @@ inline Index::Index() {
   rowZ_.resize(tz);
   for (int k = 0; k <= MAX_SEEDS; ++k) {
     size_t ia = offA_[k], iz = offZ_[k];
-    uint8_t c[ROW];
-    for (c[0] = 0; c[0] <= k; ++c[0])
-     for (c[1] = 0; c[0] + c[1] <= k; ++c[1])
-      for (c[2] = 0; c[0] + c[1] + c[2] <= k; ++c[2])
-       for (c[3] = 0; c[0] + c[1] + c[2] + c[3] <= k; ++c[3])
-        for (c[4] = 0; c[0] + c[1] + c[2] + c[3] + c[4] <= k; ++c[4]) {
-          c[5] = uint8_t(k - c[0] - c[1] - c[2] - c[3] - c[4]);
-          uint64_t v = 0;
-          std::memcpy(&v, c, ROW);
-          rowA_[ia++] = v;
-          if (!(c[0] && c[1] && c[2] && c[3] && c[4] && c[5])) rowZ_[iz++] = v;
-        }
+    uint8_t c[8] = {};
+    auto rec = [&](auto& self, int j, int r) -> void {
+      if (j == ROW - 1) {
+        c[j] = uint8_t(r);
+        uint64_t v = 0;
+        std::memcpy(&v, c, ROW);
+        rowA_[ia++] = v;
+        bool zero = false;
+        for (int q = 0; q < ROW; ++q) zero |= c[q] == 0;
+        if (zero) rowZ_[iz++] = v;
+        return;
+      }
+      for (int a = 0; a <= r; ++a) { c[j] = uint8_t(a); self(self, j + 1, r - a); }
+    };
+    rec(rec, 0, k);
   }
 }
 

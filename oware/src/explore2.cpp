@@ -20,7 +20,7 @@ static int search(const Board& b, int n, int alpha, int beta) {
   int m = legalMask(b);
   if (!m) return b.rowSum(0);
   int best = -1;
-  struct Mv { int cap; Board c; } mv[6];
+  struct Mv { int cap; Board c; } mv[ROW];
   int nm = 0;
   for (int i = 0; i < ROW; ++i) if (m >> i & 1) { mv[nm].cap = play(b, i, mv[nm].c); ++nm; }
   for (int q = 0; q < nm; ++q) if (mv[q].cap)
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
         try {
           int v = search(b, n, -1, n + 1);
           EX[n][x] = int8_t(v); ++done;
-          if (v < gm[x] || v > n - gn[x]) { ++bad; if (bad < 5) { printf("UNSOUND x=%llu v=%d gm=%d gn=%d board:", (unsigned long long)x, v, gm[x], gn[x]); for (int j=0;j<12;++j) printf(" %d", b.p[j]); printf("\n"); } }
+          if (v < gm[x] || v > n - gn[x]) { ++bad; if (bad < 5) { printf("UNSOUND x=%llu v=%d gm=%d gn=%d board:", (unsigned long long)x, v, gm[x], gn[x]); for (int j=0;j<PITS;++j) printf(" %d", b.p[j]); printf("\n"); } }
           if (v == gm[x] || v == n - gn[x]) ++tight;
         } catch (int) { ++skipped; EX[n][x] = int8_t(gm[x]); }
       }

@@ -4,7 +4,9 @@ A C++20 retrograde solver for Oware (Abapa-style rules as implemented by OpenSpi
 used by Neumann & Gros, arXiv:2412.11979), covering all **889,063,398,405** positions that
 can arise after a move (Romein & Bal's 889,063,398,406 minus the initial position, which is
 resolved by a one-ply lookup). The rules solved are specified in
-[oware_6x2_paper_rules.md](oware_6x2_paper_rules.md).
+[oware_6x2_paper_rules.md](oware_6x2_paper_rules.md). The seed count is a run-time parameter
+and the row length a compile-time one, so the same solver also handles the 36-seed (3 per
+pit) game and 7×2 boards; see [Results](#results).
 
 ## What the table means — read this first
 
@@ -81,6 +83,7 @@ twelve table lookups. Unlike N Men's Morris there is no board symmetry to quotie
 
 ```sh
 make            # build/solve, build/probe, build/tests, build/xcheck, build/explore*
+                # and the 7x2 builds build/solve7, probe7, tests7, xcheck7 (OWARE_ROW=7)
 make test
 numactl --interleave=all build/solve <outdir> [seeds=48] [threads=all] [maxN=seeds]
 build/probe <outdir> s0 s1 ... s11 captured0 captured1 side_to_move
@@ -97,7 +100,12 @@ single seed can never be captured" follow from `seeds`. Each layer file records 
 count in its header (files from before this field was added are 48-seed files), so a table
 cannot be read as the wrong game. Use a separate `<outdir>` per variant.
 
-`probe` takes the OpenSpiel pit numbering (P0 owns pits 0–5, P1 owns 6–11), infers the
+The number of pits per player is the compile-time constant `OWARE_ROW` (default 6); the
+Makefile also builds every tool with `OWARE_ROW=7` under a `7` suffix (`build/solve7 <outdir>
+28` solves 7×2 with 2 seeds per pit). Sowing, the skipped origin pit, captures and the index
+generalise unchanged; `MAX_SEEDS` is 6 per pit for wider boards.
+
+`probe` takes the OpenSpiel pit numbering (P0 owns pits 0–5, P1 owns 6–11; `probe7` takes 14 pit counts), infers the
 game's seed count from the state (pits plus captured seeds), memory-maps only the layers it
 needs, and prints the value of the position and of every legal move.
 
@@ -110,10 +118,15 @@ pair index per board in index order, packed as base-P digits (3 or 2 boards per 
 ## Validation
 
 * `build/tests`: the rule examples of rules section 10, sowing laps, index round trips, closure
-  of the indexed set under moves, and the published position count 889,063,398,406.
+  of the indexed set under moves, the published position count 889,063,398,406, and the value
+  clamps for 48 and 36 seeds. `build/tests7` checks 7×2 captures and laps and the 7×2/42
+  position count 4,161,983,837,529 against the closed form.
 * `python tools/openspiel_trace.py 20000 7 | build/xcheck` (needs `pip install open_spiel==1.5`): 2,078,040 transitions from 20,000 random OpenSpiel 1.5
   games replayed through `play()`/`legalMask()` with zero mismatches (this caught a real bug:
-  a sowing of exactly 11 or 22 seeds must end on the pit before the origin).
+  a sowing of exactly 11 or 22 seeds must end on the pit before the origin). For 7×2,
+  `openspiel_trace.py 20000 7 7 2 | build/xcheck7` (1,649,966 transitions, 151,619 with
+  captures) and `openspiel_trace.py 5000 11 7 3 | build/xcheck7` (546,168 transitions) also
+  give zero mismatches.
 * `src/explore.cpp` is an independent, single-threaded, unclamped implementation of the same
   fixpoint; it agrees with `solve` on the number of inexact boards in every layer up to 17.
 * Clamping: layers 25 and 26 solved with and without clamping give identical statistics.
@@ -123,26 +136,59 @@ pair index per board in index order, packed as base-P digits (3 or 2 boards per 
 
 ## Results
 
-The full run (layers 0–46 and 48, ≈575 GB of tables, ≈600 GB RAM, 64 threads on a
-2 × EPYC 9115) is in progress at the time of this commit; this section will be updated with
-the per-layer statistics, the value of the initial position and SHA-256 digests when it
-completes. Generated tables are kept out of git.
+### 6×2, 48 seeds (standard Oware)
 
-Partial results so far — share of boards whose score is exact (`gM + gN = n`):
+Full run of layers 0–46 and 48 (64 threads on a 2 × EPYC 9115, peak 566 GB RSS,
+17.5 h of solve + verify time): **the initial position is a draw with no forced win.**
 
-| n | boards | exact |
-| ---: | ---: | ---: |
-| 4 | 1,365 | 72.8 % |
-| 8 | 75,504 | 61.1 % |
-| 12 | 1,339,702 | 18.7 % |
-| 16 | 12,685,179 | 6.5 % |
-| 20 | 80,214,915 | 3.8 % |
-| 24 | 382,628,610 | 2.4 % |
-| 28 | 1,482,519,324 | 1.3 % |
+```
+initial position: first player forces >= 23 (or fewer), second player forces >= 23 (or fewer): DRAW (no forced win)
+```
+
+Neither player can force even 24 of the 48 seeds by self-terminating play; every line that
+avoids losing runs into a repetition, whose outcome depends on the history (see
+[What the table means](#what-the-table-means--read-this-first)). The tables are 516 GB in
+48 files (`SHA256SUMS` alongside them); they are not in git.
+
+Share of boards whose score is exact (`gM + gN = n`, i.e. clamped to the levels that matter):
+
+| n | boards | exact | solve + verify |
+| ---: | ---: | ---: | ---: |
+| 4 | 1,365 | 72.8 % | |
+| 8 | 75,504 | 61.1 % | |
+| 12 | 1,339,702 | 18.7 % | |
+| 16 | 12,685,179 | 6.5 % | |
+| 20 | 80,214,915 | 3.8 % | |
+| 24 | 382,628,610 | 2.4 % | |
+| 28 | 1,482,519,324 | 1.3 % | |
+| 32 | 4,897,012,197 | 1.3 % | 8.5 min |
+| 36 | 14,257,671,649 | 3.0 % | 25 min |
+| 40 | 37,475,421,060 | 7.0 % | 65 min |
+| 44 | 90,517,649,586 | 13.5 % | 124 min |
+| 48 | 203,648,015,935 | 30.3 % | 109 min |
 
 An inexact score does not mean an undecided state: the mover still wins whenever
 `captured + gM >= 25`. `stats.txt` records win / loss / draw / `DRAW*` counts for every layer
 and score split.
+
+### 6×2, 36 seeds (3 per pit)
+
+`build/solve <outdir> 36`: 47,581,435,824 boards in layers 0–34 and 36, 26 GB of tables,
+36 min. **Draw with no forced win** as well: neither side can force more than 17 of the 36
+seeds (18 are needed for a draw by score, 19 to win). 41.7 % of the boards of the top layer
+are exact, against 30.3 % for the 48-seed game.
+
+### 7×2, 28 seeds (2 per pit)
+
+`build/solve7 <outdir> 28`: 39,080,213,240 boards in layers 0–26 and 28 (the count matches
+the closed form), 19 GB of tables, 31 min. **Draw with no forced win**: the first player can
+force at least 13 of the 28 seeds and the second at least 11 (15 win, 14–14 draws). Unlike
+the 6×2 games the opening already matters: `probe7` reports that three of the seven first
+moves (pits 1, 2 and 3) lose by force, pit 6 captures 6 seeds at once, and the other three
+keep the draw. 54.6 % of the top layer's boards are exact.
+
+SHA-256 digests of the 36-seed and 7×2 tables are in [checksums/](checksums/); the 48-seed
+digests will be added when computed.
 
 ## References
 

@@ -1,4 +1,4 @@
-// Oware 6x2 strong solver: layered retrograde analysis over the number of seeds on
+// Oware strong solver (ROW pits per player): layered retrograde analysis over the number of seeds on
 // the board, producing per-board sound guarantees (see layer.hpp) from which the
 // win/draw/loss value of every (board, scores, side to move) state follows.
 //
@@ -73,7 +73,7 @@ static inline void forPredecessors(const Board& y, int n, F&& f) {
     if (t[i]) continue;
     Board b;
     for (int s = 1; s <= n; ++s) {
-      int laps = s / 11, rem = s % 11;
+      int laps = s / (PITS - 1), rem = s % (PITS - 1);
       bool ok = true;
       for (int d = 1; d < PITS; ++d) {
         int j = i + d; if (j >= PITS) j -= PITS;
@@ -273,7 +273,7 @@ int main(int argc, char** argv) {
   if (argc > 3 && atoi(argv[3]) > 0) omp_set_num_threads(atoi(argv[3]));
   int maxN = argc > 4 ? std::min(atoi(argv[4]), SEEDS) : SEEDS;
   const int win = winSeeds();
-  printf("solving %d-seed Oware (%d captured seeds win) into %s\n", SEEDS, win, outDir.c_str());
+  printf("solving %dx2 Oware with %d seeds (%d captured seeds win) into %s\n", ROW, SEEDS, win, outDir.c_str());
   mkdir(outDir.c_str(), 0775);
   for (int n = 0; n <= maxN; ++n) {
     if (n == SEEDS - 1) continue;  // a single seed can never be captured
