@@ -24,6 +24,19 @@ fewer ranks is a second-player win — including 6×5, which has *more* pieces a
 than 5×6 yet flips the result. Five boards is too small a sample to call it a law, but the
 6×5 / 5×6 pair is a clean controlled comparison: same 30 cells, opposite winner.
 
+### 6×6 — first-player win (compressed-DFA method, 2026-09-28)
+
+The 6×6 board was strongly solved on 2026-09-28 by the compressed-DFA solver
+in the separate `dfa-games` tree (`build_forward_backward breakthrough_6x6 85 0`:
+exact horizon-zero induction over plies 85→0). All 86 plies are fully decided —
+zero undecided positions, no draws — with the busiest ply holding 3.57×10^12
+positions. **The initial position is a first-player win**, consistent with
+every 6-rank board in the table above. The result is being packaged as a
+compressed WDL tablebase (`breakthrough-6x6-wdl.tar.zst`: manifest, four
+membership DFAs, and a dependency-free `query.py`) giving instant
+WIN/LOSS/UNREACHABLE lookup for any position reachable from the standard
+initial position.
+
 ## Rules
 
 Side 0 starts on ranks 0–1 and advances toward rank `H-1`; side 1 mirrors it. A piece moves
