@@ -37,6 +37,17 @@ membership DFAs, and a dependency-free `query.py`) giving instant
 WIN/LOSS/UNREACHABLE lookup for any position reachable from the standard
 initial position.
 
+Statistics, from the exact per-ply solve: the reachable set contains
+**≈ 7.4×10^15 positions** (board + side to move) across the game's 86 plies
+(0–85; the longest line is 85 plies). The game tree widens for a long time
+after the opening — the busiest ply, ≈ 38, holds ≈ 4.3×10^14 positions, about
+100× more than ply 20 — before endgame collapse. The side to move is winning
+in ≈ 29% of all reachable positions and losing in ≈ 71%. For comparison, the
+largest board solved with the ZDD method above (5×6) has 3.3×10^11 states:
+6×6 is roughly twenty thousand times larger, well beyond that solver's
+reach — the compressed-DFA solve needed ~5 weeks of wall clock (64-thread
+EPYC, with interruptions), dominating runs of ~10^13-position plies in hours.
+
 ## Rules
 
 Side 0 starts on ranks 0–1 and advances toward rank `H-1`; side 1 mirrors it. A piece moves
