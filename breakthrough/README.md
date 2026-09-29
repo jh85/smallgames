@@ -17,12 +17,21 @@ ranks. Side 0 moves first, advancing toward rank `H-1`; side 1 advances toward r
 | 4×6 | 8 | 2,047 | 5,068,267,595 | 10,136,535,190 | 1.2 GB | 5.3 min | **first player wins** |
 | 6×5 | 12 | 4,612 | 1,366,509,897,411 | 2,733,019,794,822 | 319 GB | 13.7 h | **second player wins** |
 | 5×6 | 10 | 3,899 | 1,664,989,639,141 | 3,329,979,278,282 | 388 GB | 17.2 h | **first player wins** |
+| 6×6 | 12 | — † | — † | 2,211,324,356,809,730 | 17 GB † | ~5 weeks † | **first player wins** |
+
+† Solved with the compressed-DFA method (subsection below), not the ZDD solver
+above, so slabs and per-slab configuration counts do not apply. *states* =
+distinct reachable positions (board + side to move; ≈1.10×10^15 with side 0 to
+move, ≈1.11×10^15 with side 1). *table* = the four membership DFAs (53 GB raw)
+in the compressed `breakthrough-6x6-wdl.tar.zst` bundle. Time is total wall
+clock across the ~5-week build (with interruptions, 64 threads).
 
 Times are wall clock on 2× EPYC 9115 (64 threads). Across this set the number of *ranks*
 decides the outcome: every 6-rank board is a first-player win and every board with 5 or
 fewer ranks is a second-player win — including 6×5, which has *more* pieces and more cells
 than 5×6 yet flips the result. Five boards is too small a sample to call it a law, but the
-6×5 / 5×6 pair is a clean controlled comparison: same 30 cells, opposite winner.
+6×5 / 5×6 pair is a clean controlled comparison: same 30 cells, opposite winner. The 6×6
+result below adds a third 6-rank board to the pattern.
 
 ### 6×6 — first-player win (compressed-DFA method, 2026-09-28)
 
