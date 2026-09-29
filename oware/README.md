@@ -85,7 +85,7 @@ twelve table lookups. Unlike N Men's Morris there is no board symmetry to quotie
 make            # build/solve, build/probe, build/tests, build/xcheck, build/explore*
                 # and the 7x2 builds build/solve7, probe7, tests7, xcheck7 (OWARE_ROW=7)
 make test
-numactl --interleave=all build/solve <outdir> [seeds=48] [threads=all] [maxN=seeds]
+numactl --interleave=all build/solve <outdir> [seeds=48] [threads=all] [maxN=seeds] [mode=auto|ram|stream]
 build/probe <outdir> s0 s1 ... s11 captured0 captured1 side_to_move
 ```
 
@@ -135,6 +135,23 @@ pair index per board in index order, packed as base-P digits (3 or 2 boards per 
 * Every layer passes the built-in fixpoint verification before it is written.
 
 ## Results
+
+All solved variants at a glance. "Positions" counts the indexed boards — every state
+that can arise after a move (for 6×2/48, plus the initial position this is the
+889,063,398,406 of Romein & Bal 2003). "Top layer exact" is the share of the
+largest layer's boards whose score is pinned down exactly (`gM + gN = n`).
+
+| Board | Seeds | Positions | Layer files | Tables | Top layer exact | Initial position | Solve time |
+| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+| 6×2 | 48 (4/pit) | 889,063,398,405 | 48 | 516 GB | 30.3 % | Draw, no forced win (both sides force ≥ 23) | 17.5 h |
+| 6×2 | 36 (3/pit) | 47,581,435,824 | 36 | 26.9 GB | 41.7 % | Draw, no forced win (both sides force ≥ 17) | 36 min |
+| 7×2 | 28 (2/pit) | 39,080,213,240 | 28 | 19.5 GB | 54.6 % | Draw, no forced win (first player forces ≥ 13, second ≥ 11) | 31 min |
+| 7×2 | 42 (3/pit) | 4,161,983,837,529 | 42 | ~2.36 TB | — | solving in progress | est. 4–8 days |
+
+File counts already skip the one impossible layer in each game (a single seed can
+never be captured, so layer `seeds − 1` does not exist: 47, 35, 27 and 41
+respectively). The 7×2/42 row will be filled in when its run finishes (top-layer
+exact %, verdict, actual time).
 
 ### 6×2, 48 seeds (standard Oware)
 
