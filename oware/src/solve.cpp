@@ -2,7 +2,7 @@
 // the board, producing per-board sound guarantees (see layer.hpp) from which the
 // win/draw/loss value of every (board, scores, side to move) state follows.
 //
-//   solve <outdir> [seeds=48] [threads=all] [maxN=seeds]
+//   solve <outdir> [seeds=48] [threads=all] [maxN=seeds] [mode=auto|ram|stream]
 //
 // seeds is the total number of seeds in the game (4 per pit = 48 for standard Oware,
 // 3 per pit = 36, ...); the rules are otherwise unchanged and seeds/2+1 captures win.
@@ -16,12 +16,28 @@
 // A final full pass re-evaluates every board and checks that the result is a
 // fixpoint; values only ever rise from 0, so a fixpoint reached this way is the least
 // one.  The pass also gathers statistics and converts the layer to its final packing.
+//
+// Two solving modes per layer (7x2_42_out_of_core_plan.md): "ram" keeps every
+// finished layer in anonymous memory and reads captured-into layers at random, which
+// only works while the tables fit in RAM.  "stream" first makes one sequential pass
+// over the lower-layer files that folds every capturing move into the layer's
+// initial value (via max) and into a per-board capN array (via min), so the in-layer
+// sweeps never touch the lower layers at all.  The capture pass enumerates
+// (parent mover row, sown pit) by un-sowing the child's opponent row, so each
+// (parent, pit) pair is visited exactly once and every lower-layer byte is streamed
+// once per top layer.  "auto" picks ram while the accounting fits and switches to
+// stream (dropping the RAM layers; they remain on disk) for the layers that do not.
 #include <omp.h>
+#include <fcntl.h>
+#include <immintrin.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <thread>
+#include <vector>
 #include "layer.hpp"
 #include "oware.hpp"
 using namespace oware;
@@ -29,26 +45,181 @@ using namespace oware;
 static Index IX;
 static Layer L[MAX_SEEDS + 1];
 static std::string outDir;
-static const uint64_t BLOCK_WORDS = 3 * 1024;  // 196,608 boards; divisible by 2, 3, 8
+static const uint64_t BLOCK_WORDS = 3 * 1024;  // 196,608 dirty words; divisible by 2, 3, 8
+
+enum class SolveMode { AUTO, RAM,STREAM };
+static SolveMode mode = SolveMode::AUTO;
+static uint64_t budgetBytes;    // anonymous memory the solver may use (auto mode)
+static uint64_t residentBytes;  // bytes of finished layers currently kept in RAM
+
+// State of the layer being solved in streaming mode.
+static bool streaming = false;
+static uint8_t* capNData = nullptr;  // packed per-board capture ceiling
+static uint64_t capNSize = 0;        // bytes allocated at capNData
+static int capNV = 0;
+static uint64_t capNper = 1;
+static uint64_t capNplace[8];        // capNV^j
+struct alignas(64) Stripe { std::atomic_flag flag = ATOMIC_FLAG_INIT; };
+static Stripe* stripes;    // striped locks for packed read-modify-write
+static const int STRIPES_LOG2 = 16;
 
 static double now() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// Evaluate board b of layer n from its successors: codes (eM, eN).
-static inline void evaluate(const Board& b, int n, const Layer& ly, int& eM, int& eN) {
+// ---------------------------------------------------------------------------
+// Striped-lock packed field updates.  The capture pass runs with many threads
+// whose parent sets interleave at byte granularity (a packed byte holds boards
+// from unrelated parents), so every read-modify-write of a value digit or a
+// capN digit takes the stripes of all bytes it touches.  A digit spans at most
+// two consecutive bytes; locks are taken in ascending stripe-ID order (the id
+// is a hash of the byte index, NOT the byte index itself) so concurrent lockers
+// can never form a cycle (deadlock).
+// ---------------------------------------------------------------------------
+
+static inline uint64_t stripeId(uint64_t byte) {
+  return (byte ^ (byte >> 32)) & ((1u << STRIPES_LOG2) - 1);
+}
+static inline void stripeAcquire(uint64_t byte) {
+  auto& s = stripes[stripeId(byte)].flag;
+  while (s.test_and_set(std::memory_order_acquire)) _mm_pause();
+}
+static inline void stripeRelease(uint64_t byte) {
+  stripes[stripeId(byte)].flag.clear(std::memory_order_release);
+}
+// Lock the stripes covering bytes b0..b1 (b1 == b0 or b0+1), ascending id order.
+static inline void stripeLock2(uint64_t b0, uint64_t b1, bool& swapped) {
+  uint64_t s0 = stripeId(b0), s1 = stripeId(b1);
+  swapped = s1 < s0;
+  if (swapped) std::swap(s0, s1);
+  auto& a = stripes[s0].flag;
+  while (a.test_and_set(std::memory_order_acquire)) _mm_pause();
+  if (s1 != s0) {
+    auto& b = stripes[s1].flag;
+    while (b.test_and_set(std::memory_order_acquire)) _mm_pause();
+  }
+}
+static inline void stripeUnlock2(uint64_t b0, uint64_t b1, bool swapped) {
+  uint64_t s0 = stripeId(b0), s1 = stripeId(b1);
+  if (swapped) std::swap(s0, s1);
+  if (s1 != s0) stripes[s1].flag.clear(std::memory_order_release);
+  stripes[s0].flag.clear(std::memory_order_release);
+}
+
+// Raise the mover guarantee of board x to at least eM (a clamp code); the stored
+// opponent guarantee is left untouched (still 0 while the capture pass runs, so
+// the raised pair stays a valid code).
+static void seedM(Layer& ly, uint64_t x, int eM) {
+  uint8_t* ptr;
+  unsigned sh;
+  bool two;
+  switch (ly.mode) {
+    case RADIX:
+      ptr = ly.data + x / ly.G, sh = 0, two = false;
+      break;
+    case BITSP: {  // 64-board group padded to a cache line; window never leaves it
+      uint64_t bit = (x & 63) * ly.w;
+      ptr = ly.data + (x >> 6) * 64 + (bit >> 3);
+      sh = unsigned(bit & 7);
+      two = (sh + ly.w) > 8;
+      break;
+    }
+    case BITS: {
+      uint64_t bit = x * ly.w;
+      ptr = ly.data + (bit >> 3);
+      sh = unsigned(bit & 7);
+      two = (sh + ly.w) > 8;
+      break;
+    }
+    default:
+      ptr = ly.data + 2 * x, sh = 0, two = true;
+      break;
+  }
+  const uint64_t b0 = uint64_t(ptr - ly.data), b1 = b0 + (two ? 1 : 0);
+  bool swapped;
+  stripeLock2(b0, b1, swapped);
+#ifdef OW_DEBUG_CHECKS
+  if (b1 >= ly.bytes + 2) { fprintf(stderr, "seedM OOB n=%d x=%" PRIu64 " b1=%" PRIu64 " bytes=%" PRIu64 "\n", ly.n, x, b1, ly.bytes); exit(4); }
+#endif
+#ifdef OW_DEBUG_CHECKS
+  {
+    int pv, qv;
+    if (ly.mode == U16) { uint16_t t; memcpy(&t, ptr, 2); pv = t; }
+    else if (ly.mode == RADIX) pv = (ly.data[b0] / ly.pw[x % ly.G]) % ly.P;
+    else { uint16_t t; memcpy(&t, ptr, 2); pv = (t >> sh) & ((1 << ly.w) - 1); }
+    if (pv >= ly.P) { fprintf(stderr, "seedM bad code n=%d x=%" PRIu64 " p=%d P=%d\n", ly.n, x, pv, ly.P); exit(4); }
+    qv = ly.enc[eM][ly.decN[pv]];
+    if (qv == 0xffff) { fprintf(stderr, "seedM bad raise n=%d x=%" PRIu64 " eM=%d eN=%d V=%d\n", ly.n, x, eM, ly.decN[pv], ly.V); exit(4); }
+  }
+#endif
+  if (ly.mode == U16) {
+    uint16_t v;
+    memcpy(&v, ptr, 2);
+    if (ly.decM[v] < eM) {
+      uint16_t q = ly.enc[eM][ly.decN[v]];
+      memcpy(ptr, &q, 2);
+    }
+  } else if (ly.mode == RADIX) {
+    uint8_t v = *ptr;
+    int p = (v / ly.pw[x % ly.G]) % ly.P;
+    if (ly.decM[p] < eM) {
+      int q = ly.enc[eM][ly.decN[p]];
+      *ptr = uint8_t(v + (q - p) * ly.pw[x % ly.G]);
+    }
+  } else {  // BITS / BITSP: touch only the bytes the field occupies
+    uint16_t mask = (1u << ly.w) - 1;
+    if (!two) {
+      uint8_t v = *ptr;
+      int p = (v >> sh) & mask;
+      if (ly.decM[p] < eM) *ptr = uint8_t((v & ~(mask << sh)) | (ly.enc[eM][ly.decN[p]] << sh));
+    } else {
+      uint16_t v;
+      memcpy(&v, ptr, 2);
+      int p = (v >> sh) & mask;
+      if (ly.decM[p] < eM) {
+        uint16_t q = uint16_t((v & ~(mask << sh)) | (ly.enc[eM][ly.decN[p]] << sh));
+        memcpy(ptr, &q, 2);
+      }
+    }
+  }
+  stripeUnlock2(b0, b1, swapped);
+}
+
+// Lower the capture ceiling of board x to at most e (a clamp code in [0, V-1]).
+static inline void capNmin(uint64_t x, int e) {
+  uint64_t byte = x / capNper;
+  uint64_t place = capNplace[x % capNper];
+#ifdef OW_DEBUG_CHECKS
+  if (byte >= capNSize || e >= capNV) {
+    fprintf(stderr, "capNmin OOB x=%" PRIu64 " byte=%" PRIu64 " e=%d V=%d\n", x, byte, e, capNV);
+    exit(4);
+  }
+#endif
+  stripeAcquire(byte);
+  int cur = int((capNData[byte] / place) % capNV);
+  if (cur > e) capNData[byte] = uint8_t(capNData[byte] + (e - cur) * place);
+  stripeRelease(byte);
+}
+
+static inline int capNget(uint64_t x) {
+  return int((capNData[x / capNper] / capNplace[x % capNper]) % capNV);
+}
+
+// Evaluate board x of layer n from its successors: codes (eM, eN).
+static inline void evaluate(const Board& b, uint64_t x, int n, const Layer& ly, int& eM, int& eN) {
   int mask = legalMask(b);
   if (!mask) {  // no legal move: remaining seeds go to the owners of their pits
     eM = ly.clampCode(b.rowSum(0));
     eN = ly.clampCode(b.rowSum(ROW));
     return;
   }
-  int M = 0, N = ly.V - 1;
+  int M = 0, N = streaming ? capNget(x) : ly.V - 1;
   Board c;
   for (int i = 0; i < ROW; ++i) {
     if (!(mask >> i & 1)) continue;
     int cap = play(b, i, c);
     if (cap) {
+      if (streaming) continue;  // folded into the stored value (capM) and capN by the capture pass
       const Layer& lc = L[n - cap];
       int p = lc.get(IX.rank(c, n - cap));
       M = std::max(M, ly.clampCode(cap + lc.gN(p)));
@@ -94,27 +265,55 @@ static inline void forPredecessors(const Board& y, int n, F&& f) {
   }
 }
 
+// mmap a finished layer file read-only (streaming lowers, final evaluation).
+static bool mapLayerFile(int n, Layer& ly, uint8_t*& map, size_t& len) {
+  std::string path = layerPath(outDir, n);
+  int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) return false;
+  struct stat st;
+  if (fstat(fd, &st) != 0) { perror("fstat"); exit(1); }
+  void* p = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+  if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+  close(fd);
+  FileHeader h;
+  memcpy(&h, p, sizeof h);
+  Layer want;
+  want.describe(n, IX.layerSize(n));
+  uint64_t wantBytes = want.bytesFor(want.finalMode(), want.G, want.w, want.size);
+  bool ok = !memcmp(h.magic, "OWARELH1", 8) && h.n == n && headerSeedsMatch(h) && h.size == want.size &&
+            h.P == want.P && h.mode == want.finalMode() && h.bytes == wantBytes;
+  if (!ok) { fprintf(stderr, "%s: bad layer file\n", path.c_str()); exit(1); }
+  ly = want;
+  ly.mode = h.mode;
+  ly.bytes = h.bytes;
+  ly.data = static_cast<uint8_t*>(p) + sizeof h;
+  map = static_cast<uint8_t*>(p);
+  len = st.st_size;
+  return true;
+}
+
 static bool loadLayer(int n) {
   std::string path = layerPath(outDir, n);
-  FILE* fp = fopen(path.c_str(), "rb");
-  if (!fp) return false;
-  FileHeader h;
-  Layer& ly = L[n];
-  bool ok = fread(&h, sizeof h, 1, fp) == 1 && !memcmp(h.magic, "OWARELH1", 8) && h.n == n &&
-            headerSeedsMatch(h) && h.size == ly.size && h.P == ly.P && h.mode == ly.finalMode();
-  if (ok) {
-    ly.alloc(h.mode);
-    ok = h.bytes == ly.bytes;
-    uint64_t done = 0;
-    while (ok && done < ly.bytes) {
-      size_t r = fread(ly.data + done, 1, std::min<uint64_t>(ly.bytes - done, 1ull << 30), fp);
-      if (!r) ok = false;
-      done += r;
-    }
-    if (!ok) ly.release();
-  }
-  fclose(fp);
-  return ok;
+  Layer ly;
+  uint8_t* map;
+  size_t len;
+  if (!mapLayerFile(n, ly, map, len)) return false;
+  L[n] = ly;
+  L[n].alloc(ly.mode);
+  memcpy(L[n].data, ly.data, ly.bytes);
+  munmap(map, len);
+  return true;
+}
+
+// Resume check for a layer solved in streaming mode: validate the file without
+// bringing it into RAM.
+static bool layerFileOk(int n) {
+  Layer ly;
+  uint8_t* map;
+  size_t len;
+  if (!mapLayerFile(n, ly, map, len)) return false;
+  munmap(map, len);
+  return true;
 }
 
 static void saveLayer(int n) {
@@ -136,12 +335,215 @@ static void saveLayer(int n) {
   rename(tmp.c_str(), path.c_str());
 }
 
-static void solveLayer(int n) {
+// ---------------------------------------------------------------------------
+// Streaming capture pass (7x2_42_out_of_core_plan.md 3.2).  Lower layers are
+// final, so a board's best capture never changes during the fixpoint iteration.
+// capM(b) = max over capturing moves of cap + gN(child) is folded into the
+// layer's initial value; capN(b) = min over capturing moves of gM(child) goes
+// into the capN array.  Afterwards the sweeps only need same-layer children.
+//
+// A capturing child's opponent row is the parent's mover row after sowing, so
+// the pass iterates over that row R' in index order: for each R' it streams the
+// runs of all reachable lower layers (all boards with opponent row R'), un-sows
+// every empty pit of R' into parent mover rows M, enumerates every opponent row
+// O of the matching sum, and applies play() to reach each (parent, pit) pair
+// exactly once.
+// ---------------------------------------------------------------------------
+struct MappedLower {
+  int n = -1;
+  Layer ly;
+  uint8_t* map = nullptr;
+  size_t len = 0;
+};
+
+static void stratumBytes(const Layer& ly, int n, int kp, uint64_t& b0, uint64_t& b1) {
+  uint64_t s0 = IX.base(n, kp), s1 = IX.base(n, kp + 1);
+  b0 = 56 + (ly.mode == RADIX ? s0 / ly.G : ly.mode == BITS ? (s0 * ly.w) >> 3 : 2 * s0);
+  b1 = 56 + (ly.mode == RADIX ? (s1 + ly.G - 1) / ly.G
+                              : ly.mode == BITS ? ((s1 * ly.w) >> 3) + (((s1 * ly.w) & 7) != 0) : 2 * s1);
+  b0 &= ~uint64_t(4095);
+  b1 = (b1 + 4095) & ~uint64_t(4095);
+}
+
+static void capturePass(int n) {
+  Layer& ly = L[n];
+  MappedLower lowers[20];
+  int nLow = 0, byCap[21];  // capture size -> index in lowers
+  for (int cap = 20; cap >= 2; --cap) byCap[cap] = -1;
+  for (int m = std::max(0, n - 20); m <= n - 2; ++m) {
+    MappedLower lo;
+    if (!mapLayerFile(m, lo.ly, lo.map, lo.len)) { perror(layerPath(outDir, m).c_str()); exit(1); }
+    lo.n = m;
+    lowers[nLow] = lo;
+    if (n - m >= 2 && n - m <= 20) byCap[n - m] = nLow;
+    ++nLow;
+  }
+
+  double t0 = now();
+  std::atomic<uint64_t> totPlays{0}, totCaps{0}, totIter{0};
+  std::atomic<uint64_t> rzDone{0};
+  std::atomic<int> curKp{-1};
+  std::atomic<bool> passDone{false};
+  std::thread watchdog([&] {
+    while (!passDone.load(std::memory_order_relaxed)) {
+      for (int i = 0; i < 10 && !passDone.load(std::memory_order_relaxed); ++i) usleep(1000000);
+      if (passDone.load(std::memory_order_relaxed)) break;
+      fprintf(stderr, "watchdog n=%d k'=%d rzDone=%" PRIu64 " iters=%" PRIu64 " t=%.0fs\n", n,
+              curKp.load(std::memory_order_relaxed), rzDone.load(std::memory_order_relaxed),
+              totIter.load(std::memory_order_relaxed), now() - t0);
+      fflush(stderr);
+    }
+  });
+  for (int kp = 0; kp <= n - 2; ++kp) {
+    curKp = kp;
+    rzDone = 0;
+    double tp = now();
+    uint64_t iter0 = totIter.load(std::memory_order_relaxed), caps0 = totCaps.load(std::memory_order_relaxed);
+    // Stream the k'-strata of every lower layer in; each byte of every lower file
+    // is touched in exactly one k' phase.
+    for (int q = 0; q < nLow; ++q) {
+      MappedLower& lo = lowers[q];
+      if (kp > lo.n) continue;
+      uint64_t b0, b1;
+      stratumBytes(lo.ly, lo.n, kp, b0, b1);
+      b1 = std::min(b1, lo.len);
+      if (b1 > b0) madvise(lo.map + b0, b1 - b0, MADV_WILLNEED);
+    }
+    const uint32_t cntZ = IX.cntZ(kp);
+    const uint64_t* rowsZp = IX.rowsZ(kp);
+    #pragma omp parallel for schedule(dynamic, 8)
+    for (uint64_t rz = 0; rz < cntZ; ++rz) {
+      rzDone.fetch_add(1, std::memory_order_relaxed);
+      uint8_t Rp[ROW];
+      memcpy(Rp, &rowsZp[rz], ROW);
+      uint64_t runStart[20];
+      for (int q = 0; q < nLow; ++q)
+        runStart[q] = kp <= lowers[q].n ? IX.base(lowers[q].n, kp) + rz * IX.cntA(lowers[q].n - kp) : 0;
+      for (int i = 0; i < ROW; ++i) {
+        if (Rp[i]) continue;
+        uint8_t M[ROW];
+        for (int s = 1; s <= MAX_SEEDS; ++s) {
+          int laps = s / (PITS - 1), rem = s % (PITS - 1);
+          bool ok = true;
+          int mSum = s;  // |M| is invariant in s: each step adds 1 seed at pit i and at
+          for (int j = 0; j < ROW; ++j) {  // most 1 to the take of some other mover pit
+            if (j == i) { M[j] = uint8_t(s); continue; }
+            int d = j - i;
+            if (d < 0) d += PITS;
+            int take = laps + (d <= rem);
+            if (Rp[j] < take) { ok = false; break; }
+            M[j] = uint8_t(Rp[j] - take);
+            mSum += M[j];
+          }
+          if (!ok) break;
+          int kO = n - mSum;
+          if (kO < 0) break;
+          uint32_t rankAM = IX.rankArow(M, mSum);
+          uint64_t baseO = IX.base(n, kO), spanO = IX.cntA(n - kO);
+          const uint64_t* rowsO = IX.rowsZ(kO);
+          uint32_t cntO = IX.cntZ(kO);
+          bool legal0 = kO > 0 || s > ROW - 1 - i;  // empty opponent row: must reach it
+          if (legal0) totIter += cntO;
+          for (uint32_t ro = 0; ro < cntO; ++ro) {
+            if (!legal0) continue;
+            Board b;
+            memcpy(b.p, M, ROW);
+            memcpy(b.p + ROW, &rowsO[ro], ROW);
+            Board c;
+            int cap = play(b, i, c);
+            if (!cap) continue;
+            totCaps++;
+            if (cap < 2 || cap > 20) { fprintf(stderr, "capture of %d seeds\n", cap); exit(2); }
+            int qi = byCap[cap];
+            if (qi < 0) { fprintf(stderr, "capture of %d seeds with no mapped layer\n", cap); exit(2); }
+            MappedLower& lo = lowers[qi];
+            uint32_t rm = IX.rankArow(c.p, (n - cap) - kp);
+            uint64_t x = baseO + uint64_t(ro) * spanO + rankAM;
+#ifdef OW_DEBUG_CHECKS
+            if ((n - cap) - kp < 0 || rm >= IX.cntA((n - cap) - kp) ||
+                runStart[qi] + rm >= lo.ly.size || x >= ly.size) {
+              fprintf(stderr, "capture pass OOB n=%d kp=%d cap=%d rm=%u x=%" PRIu64 "\n", n, kp, cap, rm, x);
+              exit(4);
+            }
+#endif
+            int v = lo.ly.get(runStart[qi] + rm);
+            seedM(ly, x, ly.clampCode(cap + lo.ly.gN(v)));
+            capNmin(x, ly.clampCode(lo.ly.gM(v)));
+          }
+        }
+      }
+    }
+    for (int q = 0; q < nLow; ++q) {
+      MappedLower& lo = lowers[q];
+      if (kp > lo.n) continue;
+      uint64_t b0, b1;
+      stratumBytes(lo.ly, lo.n, kp, b0, b1);
+      b1 = std::min(b1, lo.len);
+      if (b1 > b0) madvise(lo.map + b0, b1 - b0, MADV_DONTNEED);
+    }
+    printf("  n=%d capture pass k'=%d done (%.2fs this phase, %2.3fG iters, %2.2fM caps)\n", n, kp,
+           now() - tp, (totIter.load(std::memory_order_relaxed) - iter0) / 1e9,
+           (totCaps.load(std::memory_order_relaxed) - caps0) / 1e6);
+    fflush(stdout);
+  }
+  passDone.store(true, std::memory_order_relaxed);
+  watchdog.join();
+  printf("  n=%d capture pass done (%.1fs, %2.3fG iters, %2.2fM caps)\n", n, now() - t0,
+         totIter.load() / 1e9, totCaps.load() / 1e6);
+  fflush(stdout);
+  if (getenv("OW_CHECK_CAPTURE")) {  // sampled cross-check of the seeding (testing)
+    const uint64_t step = ly.size / 1000000 + 1;
+    uint64_t bad = 0;
+    for (uint64_t x = 0; x < ly.size; x += step) {
+      Board b = IX.unrank(x, n);
+      int mask = legalMask(b), capM = 0, capN = ly.V - 1;
+      Board c;
+      for (int i = 0; i < ROW; ++i) {
+        if (!(mask >> i & 1)) continue;
+        int cap = play(b, i, c);
+        if (!cap) continue;
+        for (int q = 0; q < nLow; ++q)
+          if (lowers[q].n == n - cap) {
+            int v = lowers[q].ly.get(IX.rank(c, n - cap));
+            capM = std::max(capM, ly.clampCode(cap + lowers[q].ly.gN(v)));
+            capN = std::min(capN, ly.clampCode(lowers[q].ly.gM(v)));
+          }
+      }
+      int p = ly.get(x);
+      if (ly.decM[p] != capM || capNget(x) != capN) {
+        if (++bad <= 10)
+          fprintf(stderr, "CHECK n=%d x=%" PRIu64 ": stored eM=%d capM=%d capN=%d/%d\n", n, x, ly.decM[p], capM,
+                  capNget(x), capN);
+      }
+    }
+    if (bad) { fprintf(stderr, "capture pass check FAILED: %" PRIu64 " bad boards\n", bad); exit(4); }
+    printf("  n=%d capture pass check OK\n", n);
+  }
+  for (int q = 0; q < nLow; ++q) munmap(lowers[q].map, lowers[q].len);
+}
+
+static void solveLayer(int n, bool stream) {
   Layer& ly = L[n];
   const uint64_t size = ly.size;
   double t0 = now();
-  ly.alloc(ly.workMode());
-  const uint64_t words = (size + 63) / 64;
+  streaming = stream;
+  ly.alloc(stream ? ly.streamWorkMode() : ly.workMode());
+  if (stream) {
+    capNV = ly.V;
+    capNper = capNpack(ly.V);
+    capNplace[0] = 1;
+    for (uint64_t j = 1; j <= capNper; ++j) capNplace[j] = capNplace[j - 1] * capNV;
+    capNData = static_cast<uint8_t*>(mmap(nullptr, capNbytes(capNV, size) + 8, PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+    if (capNData == MAP_FAILED) { perror("mmap"); exit(1); }
+    capNSize = capNbytes(capNV, size);
+    madvise(capNData, capNbytes(capNV, size), MADV_HUGEPAGE);
+    memset(capNData, int(capNplace[capNper] - 1), capNbytes(capNV, size));  // every digit = V-1
+    capturePass(n);
+  }
+
+  const uint64_t groups = (size + 7) / 8;
+  const uint64_t words = (groups + 63) / 64;
   const uint64_t blocks = (words + BLOCK_WORDS - 1) / BLOCK_WORDS;
   auto* dirty = static_cast<std::atomic<uint64_t>*>(
       mmap(nullptr, words * 8 + 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
@@ -150,14 +552,14 @@ static void solveLayer(int n) {
   auto setAllDirty = [&] {
     #pragma omp parallel for schedule(static)
     for (uint64_t wd = 0; wd < words; ++wd) {
-      uint64_t left = size - wd * 64;
-      dirty[wd].store(left >= 64 ? ~0ull : (1ull << left) - 1, std::memory_order_relaxed);
+      uint64_t left = groups - wd * 64;
+      dirty[wd].store(left >= 64 ? ~0ull : left > 0 ? (1ull << left) - 1 : 0, std::memory_order_relaxed);
     }
   };
 
   // Sweep 0 seeds every board from terminals, captures and whatever is already known
   // in the layer, without predecessor marking; afterwards everything is dirty once
-  // more and later sweeps propagate changes only.
+  // more and later sweeps propagate changes only.  Dirty bits are per 8 boards.
   setAllDirty();
   for (int sweep = 0;; ++sweep) {
     uint64_t processed = 0, changed = 0;
@@ -169,25 +571,28 @@ static void solveLayer(int n) {
         if (!dirty[wd].load(std::memory_order_relaxed)) continue;
         uint64_t bits = dirty[wd].exchange(0);
         while (bits) {
-          uint64_t x = wd * 64 + __builtin_ctzll(bits);
+          uint64_t g = wd * 64 + __builtin_ctzll(bits);
           bits &= bits - 1;
-          ++processed;
-          int p = ly.get(x);
-          if (ly.decM[p] + ly.decN[p] == ly.V - 1) continue;  // already exact
-          Board b = IX.unrank(x, n);
-          int eM, eN;
-          evaluate(b, n, ly, eM, eN);
-          eM = std::max<int>(eM, ly.decM[p]);
-          eN = std::max<int>(eN, ly.decN[p]);
-          int q = ly.enc[eM][eN];
-          if (q == p) continue;
-          if (q == 0xffff) { fprintf(stderr, "inconsistent guarantees n=%d x=%" PRIu64 "\n", n, x); exit(2); }
-          ly.set(x, p, q);
-          ++changed;
-          if (sweep > 0)
-            forPredecessors(b, n, [&](uint64_t pi) {
-              dirty[pi >> 6].fetch_or(1ull << (pi & 63));
-            });
+          uint64_t x0 = g * 8, x1 = std::min(size, x0 + 8);
+          for (uint64_t x = x0; x < x1; ++x) {
+            ++processed;
+            int p = ly.get(x);
+            if (ly.decM[p] + ly.decN[p] == ly.V - 1) continue;  // already exact
+            Board b = IX.unrank(x, n);
+            int eM, eN;
+            evaluate(b, x, n, ly, eM, eN);
+            eM = std::max<int>(eM, ly.decM[p]);
+            eN = std::max<int>(eN, ly.decN[p]);
+            int q = ly.enc[eM][eN];
+            if (q == p) continue;
+            if (q == 0xffff) { fprintf(stderr, "inconsistent guarantees n=%d x=%" PRIu64 "\n", n, x); exit(2); }
+            ly.set(x, p, q);
+            ++changed;
+            if (sweep > 0)
+              forPredecessors(b, n, [&](uint64_t pi) {
+                dirty[pi >> 9].fetch_or(1ull << ((pi >> 3) & 63));
+              });
+          }
         }
       }
     }
@@ -206,11 +611,19 @@ static void solveLayer(int n) {
   if (convert) fin.alloc(ly.finalMode());
   std::vector<uint64_t> hist(ly.P, 0);
   uint64_t bad = 0;
-  const uint64_t groups = (size + 7) / 8;
   #pragma omp parallel
   {
     std::vector<uint64_t> h(ly.P, 0);
     uint64_t myBad = 0;
+    // In streaming mode evaluate() omits capturing moves: their contribution is in
+    // the stored value (capM) and in capN.  A stored fixpoint then must satisfy
+    // eN == eN(stored) and eM <= eM(stored); eM(stored) >= capM holds by seeding,
+    // so eM(stored) >= max(capM, non-capturing max) = the true fixpoint value.
+    auto check = [&](uint64_t x, int p) {
+      int eM, eN;
+      evaluate(IX.unrank(x, n), x, n, ly, eM, eN);
+      if (streaming ? (eM > ly.decM[p] || eN != ly.decN[p]) : (eM != ly.decM[p] || eN != ly.decN[p])) ++myBad;
+    };
     #pragma omp for schedule(dynamic, 1 << 14)
     for (uint64_t g = 0; g < groups; ++g) {
       uint64_t acc = 0;
@@ -218,13 +631,9 @@ static void solveLayer(int n) {
         int p = ly.get(x);
         ++h[p];
         if (ly.decM[p] + ly.decN[p] != ly.V - 1) {
-          int eM, eN;
-          evaluate(IX.unrank(x, n), n, ly, eM, eN);
-          if (eM != ly.decM[p] || eN != ly.decN[p]) ++myBad;
+          check(x, p);
         } else if ((x & 1023) == 0) {  // spot-check exact entries too
-          int eM, eN;
-          evaluate(IX.unrank(x, n), n, ly, eM, eN);
-          if (eM != ly.decM[p] || eN != ly.decN[p]) ++myBad;
+          check(x, p);
         }
         acc |= uint64_t(p) << ((x & 7) * ly.w);
       }
@@ -259,12 +668,51 @@ static void solveLayer(int n) {
             n, c, c2, W, Lo, Dx, Dc);
   }
   fclose(fs);
-  printf("layer %2d: size %" PRIu64 " exact %.3f%% solve %.1fs verify %.1fs\n", n, size, 100.0 * exact / std::max<uint64_t>(size, 1), t1 - t0, now() - t1);
+  printf("layer %2d: size %" PRIu64 " exact %.3f%% solve %.1fs verify %.1fs%s\n", n, size,
+         100.0 * exact / std::max<uint64_t>(size, 1), t1 - t0, now() - t1, stream ? " (stream)" : "");
   fflush(stdout);
+
+  if (stream) {
+    munmap(capNData, capNbytes(capNV, size) + 8);
+    capNData = nullptr;
+    ly.release();  // streaming layers live on disk only
+    streaming = false;
+  }
+}
+
+// Anonymous memory a layer's working set needs in the given mode.
+static uint64_t workBytes(int n, bool stream) {
+  Layer ly;
+  ly.describe(n, IX.layerSize(n));
+  uint64_t w = ly.bytesFor(stream ? ly.streamWorkMode() : ly.workMode(), ly.G, ly.w, ly.size);
+  w += ly.size / 512 + 4096;  // dirty bit per 8 boards
+  if (stream) {
+    w += capNbytes(ly.V, ly.size);
+    uint64_t mapped = 0;      // page tables for the memory-mapped lower files
+    for (int m = std::max(0, n - 20); m <= n - 2; ++m) {
+      Layer lo;
+      lo.describe(m, IX.layerSize(m));
+      mapped += lo.bytesFor(lo.finalMode(), lo.G, lo.w, lo.size) + 4096;
+    }
+    w += mapped / 512 + (1ull << 33);  // margin for the streaming pass itself
+  }
+  return w;
+}
+
+static uint64_t memAvailable() {
+  FILE* fp = fopen("/proc/meminfo", "r");
+  uint64_t kb = 700ull << 20;
+  if (fp) {
+    char line[256];
+    while (fgets(line, sizeof line, fp))
+      if (sscanf(line, "MemAvailable: %" SCNu64 " kB", &kb) == 1) break;
+    fclose(fp);
+  }
+  return kb << 10;
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [seeds=48] [threads=all] [maxN=seeds]\n"); return 1; }
+  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [seeds=48] [threads=all] [maxN=seeds] [mode=auto|ram|stream]\n"); return 1; }
   outDir = argv[1];
   SEEDS = argc > 2 ? atoi(argv[2]) : MAX_SEEDS;
   if (SEEDS < 2 || SEEDS > MAX_SEEDS || SEEDS % 2) {
@@ -272,24 +720,63 @@ int main(int argc, char** argv) {
   }
   if (argc > 3 && atoi(argv[3]) > 0) omp_set_num_threads(atoi(argv[3]));
   int maxN = argc > 4 ? std::min(atoi(argv[4]), SEEDS) : SEEDS;
+  if (argc > 5) {
+    std::string m = argv[5];
+    if (m == "ram") mode = SolveMode::RAM;
+    else if (m == "stream") mode = SolveMode::STREAM;
+    else if (m != "auto") { fprintf(stderr, "mode must be auto, ram or stream\n"); return 1; }
+  }
+  stripes = static_cast<Stripe*>(aligned_alloc(64, sizeof(Stripe) * (1u << STRIPES_LOG2)));
+  for (int i = 0; i < (1 << STRIPES_LOG2); ++i) new (stripes + i) Stripe;  // flags start clear
+  const uint64_t avail = memAvailable();
+  budgetBytes = mode == SolveMode::AUTO ? avail - (6ull << 30) : ~0ull;
+  if (mode == SolveMode::AUTO && getenv("OW_BUDGET_GB"))  // testing: force the auto decision
+    budgetBytes = uint64_t(atof(getenv("OW_BUDGET_GB")) * (1ull << 30));
   const int win = winSeeds();
-  printf("solving %dx2 Oware with %d seeds (%d captured seeds win) into %s\n", ROW, SEEDS, win, outDir.c_str());
+  printf("solving %dx2 Oware with %d seeds (%d captured seeds win) into %s, mode %s, %.0f GiB available\n",
+         ROW, SEEDS, win, outDir.c_str(), mode == SolveMode::RAM ? "ram" : mode == SolveMode::STREAM ? "stream" : "auto",
+         avail / 1073741824.0);
   mkdir(outDir.c_str(), 0775);
+  bool everStreamed = false;
   for (int n = 0; n <= maxN; ++n) {
     if (n == SEEDS - 1) continue;  // a single seed can never be captured
     L[n].describe(n, IX.layerSize(n));
-    if (loadLayer(n)) { printf("layer %2d: loaded\n", n); fflush(stdout); continue; }
-    solveLayer(n);
+    bool stream = mode == SolveMode::STREAM || (mode == SolveMode::AUTO && everStreamed);
+    if (mode == SolveMode::AUTO && !stream && residentBytes + workBytes(n, false) > budgetBytes) stream = true;
+    if (stream && !everStreamed && mode == SolveMode::AUTO) {
+      for (int m = 0; m < n; ++m)
+        if (L[m].data) L[m].release();
+      residentBytes = 0;
+      printf("layer %2d: switching to streaming mode, RAM layers released\n", n);
+      everStreamed = true;
+    }
+    if (!stream) {
+      if (loadLayer(n)) { printf("layer %2d: loaded\n", n); fflush(stdout); residentBytes += L[n].bytes; continue; }
+      solveLayer(n, false);
+      residentBytes += L[n].bytes;
+    } else {
+      if (layerFileOk(n)) { printf("layer %2d: found on disk (streaming)\n", n); fflush(stdout); continue; }
+      solveLayer(n, true);
+    }
   }
   if (maxN == SEEDS && SEEDS % PITS == 0) {
     Board init, c;
     memset(init.p, SEEDS / PITS, PITS);
     int M = 0, N = 99;
+    MappedLower finals[MAX_SEEDS + 1];
     for (int i = 0; i < ROW; ++i) {
       int cap = play(init, i, c);  // the first move can capture with 1 or 2 seeds per pit
-      const Layer& lc = L[SEEDS - cap];
-      int p = lc.get(IX.rank(c, SEEDS - cap));
-      M = std::max(M, cap + lc.gN(p)); N = std::min(N, lc.gM(p));
+      Layer* lc = &L[SEEDS - cap];
+      if (!lc->data) {  // streaming run: the layer lives on disk
+        if (finals[SEEDS - cap].map == nullptr &&
+            !mapLayerFile(SEEDS - cap, finals[SEEDS - cap].ly, finals[SEEDS - cap].map, finals[SEEDS - cap].len)) {
+          fprintf(stderr, "missing layer %d\n", SEEDS - cap);
+          return 1;
+        }
+        lc = &finals[SEEDS - cap].ly;
+      }
+      int p = lc->get(IX.rank(c, SEEDS - cap));
+      M = std::max(M, cap + lc->gN(p)); N = std::min(N, lc->gM(p));
     }
     char v[64];
     if (M >= win) snprintf(v, sizeof v, "FIRST-PLAYER WIN");

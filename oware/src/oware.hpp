@@ -117,6 +117,17 @@ class Index {
  public:
   Index();
   uint64_t layerSize(int n) const { return base_[n][n + 1]; }
+  uint64_t base(int n, int k) const { return base_[n][k]; }
+  // Rank of a mover row alone (sum = sum of its pits), as in rank() above.
+  uint32_t rankArow(const uint8_t* m, int sum) const {
+    int r = sum;
+    uint32_t rm = 0;
+    for (int j = 0; j < ROW; ++j) {
+      rm += preA_[j][r][m[j]];
+      r -= m[j];
+    }
+    return rm;
+  }
   uint64_t rank(const Board& b, int n) const {
     int k = 0, r;
     uint32_t ro = 0, rm = 0;

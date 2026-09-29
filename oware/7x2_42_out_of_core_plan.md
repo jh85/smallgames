@@ -1,5 +1,15 @@
 # Plan: solving 7×2 Oware with 42 seeds (3 per pit) on the 723 GiB machine
 
+Status: implemented and validated (2026-09-29). The streaming mode described below is
+in `src/solve.cpp` (`solve <outdir> [seeds] [threads] [maxN] [mode=auto|ram|stream]`,
+auto switching RAM→stream when the accounting says so). Validated per §3.6: forced
+streaming reproduces the 7×2/28, 6×2/36 and 6×2/48 (layers ≤ 36) tables byte for byte.
+Two fixes beyond the design as written: the packed working format pads each 64-board
+group to a cache line (BITSP) so a field's 2-byte update never splits a cache line
+(a torn read in another block corrupted layers ~1 run in 5), and the capture pass's
+packed updates take their striped locks in ascending lock-id order (the original
+byte-order locking deadlocked a run).
+
 Status: design only, written 2026-09-22. Nothing below is implemented yet. The
 solver already supports `OWARE_ROW=7` (`build/solve7`) and a run-time seed count; the
 7×2/28 game was solved with it in 31 minutes. This document records why 7×2/42 does

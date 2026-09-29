@@ -24,7 +24,7 @@
 
 namespace oware {
 
-enum Mode : int { RADIX = 0, BITS = 1, U16 = 2 };
+enum Mode : int { RADIX = 0, BITS = 1, U16 = 2, BITSP = 3 };
 
 struct Layer {
   int n = -1, A = 0, V = 0, P = 0;
@@ -58,9 +58,17 @@ struct Layer {
   static uint64_t bytesFor(int mode, int G, int w, uint64_t size) {
     if (mode == U16) return 2 * size;
     if (mode == RADIX) return (size + G - 1) / G;
+    if (mode == BITSP) return ((size + 63) / 64) * 64 + 2;  // 64-board groups padded to a cache line
     return (size * w + 7) / 8 + 2;
   }
   int workMode() const { return P > 256 ? U16 : RADIX; }
+  // Working format for out-of-core (streaming) solving: like workMode() but a
+  // padded BITS when RADIX would need a byte per board, since that packs w < 8
+  // bits per board.  BITSP aligns every 64-board group to one cache line so the
+  // 2-byte read-modify-write of a field is always a single-cache-line access
+  // (atomic on x86): the tight BITS packing lets a field window cross a cache
+  // line, and a concurrent reader in another block could then read a torn code.
+  int streamWorkMode() const { return P > 256 ? U16 : (G == 1 && w < 8) ? BITSP : RADIX; }
   int finalMode() const { return P > 256 ? U16 : (G == 1 && w < 8) ? BITS : RADIX; }
 
   void alloc(int m) {
@@ -84,6 +92,11 @@ struct Layer {
         uint16_t v; memcpy(&v, data + (bit >> 3), 2);
         return (v >> (bit & 7)) & ((1 << w) - 1);
       }
+      case BITSP: {  // each 64-board group padded to one cache line
+        uint64_t bit = (i & 63) * uint64_t(w);
+        uint16_t v; memcpy(&v, data + (i >> 6) * 64 + (bit >> 3), 2);
+        return (v >> (bit & 7)) & ((1 << w) - 1);
+      }
       default: { uint16_t v; memcpy(&v, data + 2 * i, 2); return v; }
     }
   }
@@ -100,6 +113,13 @@ struct Layer {
         uint16_t v; memcpy(&v, data + (bit >> 3), 2);
         v = uint16_t((v & ~(((1u << w) - 1) << (bit & 7))) | (unsigned(newp) << (bit & 7)));
         memcpy(data + (bit >> 3), &v, 2);
+        break;
+      }
+      case BITSP: {
+        uint64_t bit = (i & 63) * uint64_t(w);
+        uint16_t v; memcpy(&v, data + (i >> 6) * 64 + (bit >> 3), 2);
+        v = uint16_t((v & ~(((1u << w) - 1) << (bit & 7))) | (unsigned(newp) << (bit & 7)));
+        memcpy(data + (i >> 6) * 64 + (bit >> 3), &v, 2);
         break;
       }
       default: { uint16_t v = uint16_t(newp); memcpy(data + 2 * i, &v, 2); }
@@ -125,6 +145,15 @@ inline bool headerSeedsMatch(const FileHeader& h) {
 inline std::string layerPath(const std::string& dir, int n) {
   char buf[64]; snprintf(buf, sizeof buf, "/oware_n%02d.lh", n);
   return dir + buf;
+}
+
+// Packing for the per-board "capture ceiling" array of the streaming solver: the
+// smallest clamp code the opponent can force via a capturing move.  Digits are clamp
+// codes in [0, V-1], so V^g <= 256 gives g boards per byte.
+inline int capNpack(int V) { return V <= 3 ? 5 : V == 4 ? 4 : V <= 6 ? 3 : V <= 16 ? 2 : 1; }
+inline uint64_t capNbytes(int V, uint64_t size) {
+  uint64_t g = capNpack(V);
+  return (size + g - 1) / g;
 }
 
 }  // namespace oware
