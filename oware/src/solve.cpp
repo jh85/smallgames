@@ -17,6 +17,19 @@
 // fixpoint; values only ever rise from 0, so a fixpoint reached this way is the least
 // one.  The pass also gathers statistics and converts the layer to its final packing.
 //
+// Two in-layer fixpoint methods: fix=sweep is the chaotic iteration above.
+// fix=counter (default when the memory allows) is a counter-based retrograde
+// analysis: the thresholds t = V-1 .. 1 are processed from high to low, each as
+// the boolean game  W^t = {gM >= t} = {capM >= t} u {some non-capturing child in N^t},
+// N^t = {gN >= t} = {capN >= t and every non-capturing child in W^t}.  Every board
+// carries a counter of its non-capturing children not yet in W (carried over from
+// threshold to threshold since W^t contains W^(t+1)); a board enters N when the
+// counter reaches zero and it is not dead for t, its same-layer predecessors then
+// enter W, their predecessors' counters drop, and so on in generations.  Every
+// board enters W and N once, so the work is two visits of every same-layer edge
+// independent of V, against 60-90 sweeps; measured 4.7x faster on 7x2/28 layer 28.
+// The same final verification pass runs afterwards in both methods.
+//
 // Two solving modes per layer (7x2_42_out_of_core_plan.md): "ram" keeps every
 // finished layer in anonymous memory and reads captured-into layers at random, which
 // only works while the tables fit in RAM.  "stream" first makes one sequential pass
@@ -49,6 +62,8 @@ static const uint64_t BLOCK_WORDS = 3 * 1024;  // 196,608 dirty words; divisible
 
 enum class SolveMode { AUTO, RAM,STREAM };
 static SolveMode mode = SolveMode::AUTO;
+enum class FixMode { AUTO, COUNTER, SWEEP };
+static FixMode fixMode = FixMode::AUTO;
 static uint64_t budgetBytes;    // anonymous memory the solver may use (auto mode)
 static uint64_t residentBytes;  // bytes of finished layers currently kept in RAM
 
@@ -263,6 +278,308 @@ static inline void forPredecessors(const Board& y, int n, F&& f) {
       f(IX.rank(b, n));
     }
   }
+}
+
+// Raise the opponent guarantee of board x to at least eN (a clamp code), keeping
+// the mover guarantee.  Returns true if the value was raised (x newly enters N^eN).
+static bool raiseN(Layer& ly, uint64_t x, int eN) {
+  uint8_t* ptr;
+  unsigned sh;
+  bool two;
+  switch (ly.mode) {
+    case RADIX: ptr = ly.data + x / ly.G, sh = 0, two = false; break;
+    case BITSP: { uint64_t bit = (x & 63) * ly.w; ptr = ly.data + (x >> 6) * 64 + (bit >> 3); sh = unsigned(bit & 7); two = (sh + ly.w) > 8; break; }
+    case BITS: { uint64_t bit = x * ly.w; ptr = ly.data + (bit >> 3); sh = unsigned(bit & 7); two = (sh + ly.w) > 8; break; }
+    default: ptr = ly.data + 2 * x, sh = 0, two = true; break;
+  }
+  const uint64_t b0 = uint64_t(ptr - ly.data), b1 = b0 + (two ? 1 : 0);
+  bool swapped, raised = false;
+  stripeLock2(b0, b1, swapped);
+  if (ly.mode == U16) {
+    uint16_t v; memcpy(&v, ptr, 2);
+    if (ly.decN[v] < eN) { uint16_t q = ly.enc[ly.decM[v]][eN]; memcpy(ptr, &q, 2); raised = true; }
+  } else if (ly.mode == RADIX) {
+    uint8_t v = *ptr;
+    int p = (v / ly.pw[x % ly.G]) % ly.P;
+    if (ly.decN[p] < eN) { int q = ly.enc[ly.decM[p]][eN]; *ptr = uint8_t(v + (q - p) * ly.pw[x % ly.G]); raised = true; }
+  } else {
+    uint16_t mask = (1u << ly.w) - 1;
+    if (!two) {
+      uint8_t v = *ptr;
+      int p = (v >> sh) & mask;
+      if (ly.decN[p] < eN) { *ptr = uint8_t((v & ~(mask << sh)) | (ly.enc[ly.decM[p]][eN] << sh)); raised = true; }
+    } else {
+      uint16_t v; memcpy(&v, ptr, 2);
+      int p = (v >> sh) & mask;
+      if (ly.decN[p] < eN) { uint16_t q = uint16_t((v & ~(mask << sh)) | (ly.enc[ly.decM[p]][eN] << sh)); memcpy(ptr, &q, 2); raised = true; }
+    }
+  }
+  stripeUnlock2(b0, b1, swapped);
+  return raised;
+}
+
+// Like seedM but reports whether the mover guarantee was raised to eM (x newly
+// enters W^eM).
+static bool raiseM(Layer& ly, uint64_t x, int eM) {
+  int before;
+  {
+    uint8_t* ptr; unsigned sh; bool two;
+    switch (ly.mode) {
+      case RADIX: ptr = ly.data + x / ly.G, sh = 0, two = false; break;
+      case BITSP: { uint64_t bit = (x & 63) * ly.w; ptr = ly.data + (x >> 6) * 64 + (bit >> 3); sh = unsigned(bit & 7); two = (sh + ly.w) > 8; break; }
+      case BITS: { uint64_t bit = x * ly.w; ptr = ly.data + (bit >> 3); sh = unsigned(bit & 7); two = (sh + ly.w) > 8; break; }
+      default: ptr = ly.data + 2 * x, sh = 0, two = true; break;
+    }
+    const uint64_t b0 = uint64_t(ptr - ly.data), b1 = b0 + (two ? 1 : 0);
+    bool swapped;
+    stripeLock2(b0, b1, swapped);
+    int p;
+    if (ly.mode == U16) { uint16_t v; memcpy(&v, ptr, 2); p = v; }
+    else if (ly.mode == RADIX) p = (*ptr / ly.pw[x % ly.G]) % ly.P;
+    else if (!two) p = (*ptr >> sh) & ((1 << ly.w) - 1);
+    else { uint16_t v; memcpy(&v, ptr, 2); p = (v >> sh) & ((1 << ly.w) - 1); }
+    before = ly.decM[p];
+    if (before < eM) {
+      int q = ly.enc[eM][ly.decN[p]];
+      if (ly.mode == U16) { uint16_t t = uint16_t(q); memcpy(ptr, &t, 2); }
+      else if (ly.mode == RADIX) *ptr = uint8_t(*ptr + (q - p) * ly.pw[x % ly.G]);
+      else if (!two) *ptr = uint8_t((*ptr & ~(((1 << ly.w) - 1) << sh)) | (q << sh));
+      else { uint16_t v; memcpy(&v, ptr, 2); v = uint16_t((v & ~(((1 << ly.w) - 1) << sh)) | (q << sh)); memcpy(ptr, &v, 2); }
+    }
+    stripeUnlock2(b0, b1, swapped);
+  }
+  return before < eM;
+}
+
+// Same-layer predecessors of y by incremental un-sowing: one pit is decremented
+// per extra seed, so a (pit, seeds) candidate costs O(1) instead of O(PITS).
+// Equivalent to forPredecessors (checked by OW_CHECK_PRED); calls f(board).
+template <class F>
+static inline void forPredInc(const Board& y, int n, F&& f) {
+  uint8_t t[PITS];  // y seen from the previous mover's side
+  memcpy(t, y.p + ROW, ROW);
+  memcpy(t + ROW, y.p, ROW);
+  int oppTot = 0;  // previous mover's opponent row after sowing (= y's mover row)
+  for (int j = ROW; j < PITS; ++j) oppTot += t[j];
+  for (int i = 0; i < ROW; ++i) {
+    if (t[i]) continue;  // the sown pit is empty afterwards
+    Board b;
+    memcpy(b.p, t, PITS);
+    int oppSum = oppTot;  // the parent's opponent row before the move
+    int zeros = 0;        // empty pits in the parent's opponent row
+    for (int j = ROW; j < PITS; ++j) zeros += b.p[j] == 0;
+    int pos = i;
+    for (int s = 1; s <= n; ++s) {
+      pos = pos == PITS - 1 ? 0 : pos + 1;
+      if (pos == i) pos = pos == PITS - 1 ? 0 : pos + 1;
+      if (b.p[pos] == 0) break;  // demands only grow with s
+      --b.p[pos];
+      if (pos >= ROW) { --oppSum; zeros += b.p[pos] == 0; }
+      b.p[i] = uint8_t(s);
+      if (!zeros) continue;                           // parent not an indexed position
+      if (oppSum == 0 && s <= ROW - 1 - i) continue;  // feeding rule: must reach the opponent
+      if (pos >= ROW && (t[pos] == 2 || t[pos] == 3)) {  // would this move have captured?
+        int j = pos, cap = 0;
+        while (j >= ROW && (t[j] == 2 || t[j] == 3)) cap += t[j--];
+        if (cap != oppTot) continue;  // a real capture: the child is in a lower layer
+      }
+      f(b);
+    }
+  }
+}
+
+// Two-level frontier bitmap: a summary bit per 64 words (4096 boards) so that
+// clearing and scanning only touch the blocks that were used.
+struct Frontier {
+  std::atomic<uint64_t>* w = nullptr;
+  std::atomic<uint64_t>* sum = nullptr;
+  uint64_t words = 0, sums = 0;
+  void alloc(uint64_t size) {
+    words = (size + 63) / 64; sums = (words + 63) / 64;
+    void* p = mmap(nullptr, (words + sums) * 8 + 64, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    madvise(p, (words + sums) * 8, MADV_HUGEPAGE);
+    w = static_cast<std::atomic<uint64_t>*>(p);
+    sum = w + words;
+  }
+  void release() { if (w) munmap(w, (words + sums) * 8 + 64); w = nullptr; }
+  void clear() {
+    #pragma omp parallel for schedule(dynamic, 4096) if (sums > 65536)
+    for (uint64_t sw = 0; sw < sums; ++sw) {
+      uint64_t bits = sum[sw].exchange(0, std::memory_order_relaxed);
+      while (bits) { int b = __builtin_ctzll(bits); bits &= bits - 1; w[sw * 64 + b].store(0, std::memory_order_relaxed); }
+    }
+  }
+  void set(uint64_t i) {
+    uint64_t wd = i >> 6;
+    if (!w[wd].fetch_or(1ull << (i & 63), std::memory_order_relaxed)) sum[wd >> 6].fetch_or(1ull << (wd & 63), std::memory_order_relaxed);
+  }
+  bool any() const {
+    bool a = false;
+    #pragma omp parallel for schedule(static) reduction(|| : a) if (sums > 65536)
+    for (uint64_t sw = 0; sw < sums; ++sw) a = a || sum[sw].load(std::memory_order_relaxed) != 0;
+    return a;
+  }
+  void swap(Frontier& o) { std::swap(w, o.w); std::swap(sum, o.sum); std::swap(words, o.words); std::swap(sums, o.sums); }
+};
+
+// Packed 4-bit counters, two boards per byte, atomic decrement.
+struct Counters {
+  std::atomic<uint8_t>* d = nullptr;
+  uint64_t bytes = 0;
+  void alloc(uint64_t size) {
+    bytes = (size + 1) / 2 + 64;
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    madvise(p, bytes, MADV_HUGEPAGE);
+    d = static_cast<std::atomic<uint8_t>*>(p);
+  }
+  void release() { if (d) munmap(d, bytes); d = nullptr; }
+  // non-atomic init (the writer owns both boards of the byte)
+  void init(uint64_t x, int v) { uint8_t* b = reinterpret_cast<uint8_t*>(d) + (x >> 1); *b = uint8_t((*b & ~(15 << ((x & 1) * 4))) | (v << ((x & 1) * 4))); }
+  int get(uint64_t x) const { return (d[x >> 1].load(std::memory_order_relaxed) >> ((x & 1) * 4)) & 15; }
+  // decrement; returns the value before
+  int dec(uint64_t x) {
+    unsigned sh = (x & 1) * 4;
+    uint8_t v = d[x >> 1].load(std::memory_order_relaxed);
+    for (;;) {
+      int c = (v >> sh) & 15;
+      if (d[x >> 1].compare_exchange_weak(v, uint8_t(v - (1u << sh)), std::memory_order_relaxed)) return c;
+    }
+  }
+};
+
+// Counter-based in-layer fixpoint (see the header comment).  On entry the layer
+// values hold (capM, 0) for every board and capN holds the capture ceiling
+// (streaming mode), or the lower layers are resident and both are computed here
+// (ram mode).  On exit the values are the least fixpoint.
+static void counterFixpoint(int n) {
+  Layer& ly = L[n];
+  const uint64_t size = ly.size;
+  const int V = ly.V;
+  double t0 = now();
+  Counters cnt;
+  cnt.alloc(size);
+  const bool ram = !streaming;
+  // Pass 1: non-capturing move counts (and, in ram mode, capM into the values and
+  // capN into the capN array from the resident lower layers).  Chunks of 24 boards
+  // keep whole value bytes (G <= 3) and counter bytes inside one thread.
+  const uint64_t CH = 24 * 1024;
+  const bool par = size > 4 * CH;  // tiny layers: no parallel regions (their overhead dominates)
+  #pragma omp parallel for schedule(dynamic, 1) if (par)
+  for (uint64_t c0 = 0; c0 < size; c0 += CH) {
+    uint64_t c1 = std::min(size, c0 + CH);
+    for (uint64_t x = c0; x < c1; ++x) {
+      Board b = IX.unrank(x, n);
+      int mask = legalMask(b), m = 0, M = 0, N = V - 1;
+      if (!mask) { M = ly.clampCode(b.rowSum(0)); N = ly.clampCode(b.rowSum(ROW)); }
+      Board c;
+      for (int i = 0; i < ROW; ++i) {
+        if (!(mask >> i & 1)) continue;
+        int cap = play(b, i, c);
+        if (!cap) { ++m; continue; }
+        if (ram) {
+          const Layer& lc = L[n - cap];
+          int p = lc.get(IX.rank(c, n - cap));
+          M = std::max(M, ly.clampCode(cap + lc.gN(p)));
+          N = std::min(N, ly.clampCode(lc.gM(p)));
+        }
+      }
+      cnt.init(x, m);
+      if (ram) {
+        int p = ly.get(x);
+        int q = ly.enc[M][0];
+        if (q != p) ly.set(x, p, q);
+        capNmin(x, N);
+      } else if (!mask) {  // streaming: the capture pass does not see move-less boards
+        seedM(ly, x, M);
+        capNmin(x, N);
+      }
+    }
+  }
+  printf("  n=%d counter pass 1 (move counts%s): %.1fs\n", n, ram ? ", captures" : "", now() - t0);
+  fflush(stdout);
+  if (getenv("OW_CHECK_PRED")) {  // incremental vs reference predecessor generation
+    uint64_t bad = 0;
+    for (uint64_t x = 0; x < size; x += size / 100000 + 1) {
+      Board y = IX.unrank(x, n);
+      std::vector<uint64_t> a, b;
+      forPredInc(y, n, [&](const Board& p) { a.push_back(IX.rank(p, n)); });
+      forPredecessors(y, n, [&](uint64_t r) { b.push_back(r); });
+      std::sort(a.begin(), a.end()); std::sort(b.begin(), b.end());
+      bad += a != b;
+    }
+    if (bad) { fprintf(stderr, "predecessor check FAILED: %" PRIu64 "\n", bad); exit(4); }
+    printf("  n=%d predecessor check OK\n", n);
+  }
+
+  Frontier FW, FN, NW, NN;
+  FW.alloc(size); FN.alloc(size); NW.alloc(size); NN.alloc(size);
+  int maxGen = 0;
+  for (int t = V - 1; t >= 1; --t) {
+    double tt = now();
+    // Frontier init: boards whose mover guarantee is exactly t enter W^t now
+    // (higher ones entered earlier); boards with a zero counter, alive at t and
+    // not yet in N enter N^t.
+    #pragma omp parallel for schedule(dynamic, 1) if (par)
+    for (uint64_t c0 = 0; c0 < size; c0 += CH) {
+      uint64_t c1 = std::min(size, c0 + CH);
+      for (uint64_t x = c0; x < c1; ++x) {
+        int p = ly.get(x);
+        if (ly.decM[p] == t) FW.set(x);
+        if (ly.decN[p] < t && cnt.get(x) == 0 && capNget(x) >= t) {
+          ly.set(x, p, ly.enc[ly.decM[p]][t]);
+          FN.set(x);
+        }
+      }
+    }
+    int gen = 0;
+    uint64_t enteredW = 0, enteredN = 0;
+    for (;; ++gen) {
+      uint64_t vw = 0, vn = 0;
+      #pragma omp parallel for schedule(dynamic, 16) reduction(+ : vw, vn) if (par)
+      for (uint64_t sw = 0; sw < FW.sums; ++sw) {
+        uint64_t sbits = FW.sum[sw].load(std::memory_order_relaxed);
+        while (sbits) {  // y entered W: predecessors' counters drop; zero and alive -> N
+          int sb = __builtin_ctzll(sbits); sbits &= sbits - 1;
+          uint64_t wd = sw * 64 + sb;
+          uint64_t bits = FW.w[wd].load(std::memory_order_relaxed);
+          while (bits) {
+            int b = __builtin_ctzll(bits); bits &= bits - 1; ++vw;
+            Board y = IX.unrank(wd * 64 + b, n);
+            forPredInc(y, n, [&](const Board& p) {
+              uint64_t r = IX.rank(p, n);
+              if (cnt.dec(r) == 1 && capNget(r) >= t && raiseN(ly, r, t)) NN.set(r);
+            });
+          }
+        }
+        sbits = FN.sum[sw].load(std::memory_order_relaxed);
+        while (sbits) {  // y entered N: predecessors enter W
+          int sb = __builtin_ctzll(sbits); sbits &= sbits - 1;
+          uint64_t wd = sw * 64 + sb;
+          uint64_t bits = FN.w[wd].load(std::memory_order_relaxed);
+          while (bits) {
+            int b = __builtin_ctzll(bits); bits &= bits - 1; ++vn;
+            Board y = IX.unrank(wd * 64 + b, n);
+            forPredInc(y, n, [&](const Board& p) {
+              uint64_t r = IX.rank(p, n);
+              if (raiseM(ly, r, t)) NW.set(r);
+            });
+          }
+        }
+      }
+      enteredW += vw; enteredN += vn;
+      FW.clear(); FN.clear();
+      if (!NW.any() && !NN.any()) break;
+      FW.swap(NW); FN.swap(NN);
+    }
+    maxGen = std::max(maxGen, gen);
+    printf("  n=%d t=%d: entered W %" PRIu64 " N %" PRIu64 " in %d generations (%.1fs)\n", n, t, enteredW, enteredN, gen, now() - tt);
+    fflush(stdout);
+  }
+  printf("  n=%d counter fixpoint done: %.1fs, longest forced line %d plies\n", n, now() - t0, maxGen);
+  FW.release(); FN.release(); NW.release(); NN.release();
+  cnt.release();
 }
 
 // mmap a finished layer file read-only (streaming lowers, final evaluation).
@@ -522,13 +839,13 @@ static void capturePass(int n) {
   for (int q = 0; q < nLow; ++q) munmap(lowers[q].map, lowers[q].len);
 }
 
-static void solveLayer(int n, bool stream) {
+static void solveLayer(int n, bool stream, bool counter) {
   Layer& ly = L[n];
   const uint64_t size = ly.size;
   double t0 = now();
   streaming = stream;
   ly.alloc(stream ? ly.streamWorkMode() : ly.workMode());
-  if (stream) {
+  if (stream || counter) {
     capNV = ly.V;
     capNper = capNpack(ly.V);
     capNplace[0] = 1;
@@ -539,9 +856,11 @@ static void solveLayer(int n, bool stream) {
     capNSize = capNbytes(capNV, size);
     madvise(capNData, capNbytes(capNV, size), MADV_HUGEPAGE);
     memset(capNData, int(capNplace[capNper] - 1), capNbytes(capNV, size));  // every digit = V-1
-    capturePass(n);
   }
-
+  if (stream) capturePass(n);
+  if (counter) {
+    counterFixpoint(n);
+  } else {
   const uint64_t groups = (size + 7) / 8;
   const uint64_t words = (groups + 63) / 64;
   const uint64_t blocks = (words + BLOCK_WORDS - 1) / BLOCK_WORDS;
@@ -603,6 +922,8 @@ static void solveLayer(int n, bool stream) {
     if (sweep > 0 && !processed) break;
   }
   munmap(dirty, words * 8 + 8);
+  }  // sweeps
+  const uint64_t groups = (size + 7) / 8;
   double t1 = now();
 
   // Verification + statistics + final packing.
@@ -668,24 +989,33 @@ static void solveLayer(int n, bool stream) {
             n, c, c2, W, Lo, Dx, Dc);
   }
   fclose(fs);
-  printf("layer %2d: size %" PRIu64 " exact %.3f%% solve %.1fs verify %.1fs%s\n", n, size,
-         100.0 * exact / std::max<uint64_t>(size, 1), t1 - t0, now() - t1, stream ? " (stream)" : "");
+  printf("layer %2d: size %" PRIu64 " exact %.3f%% solve %.1fs verify %.1fs%s%s\n", n, size,
+         100.0 * exact / std::max<uint64_t>(size, 1), t1 - t0, now() - t1, stream ? " (stream)" : "",
+         counter ? " (counter)" : "");
   fflush(stdout);
 
-  if (stream) {
+  if (capNData) {
     munmap(capNData, capNbytes(capNV, size) + 8);
     capNData = nullptr;
+  }
+  if (stream) {
     ly.release();  // streaming layers live on disk only
     streaming = false;
   }
 }
 
 // Anonymous memory a layer's working set needs in the given mode.
-static uint64_t workBytes(int n, bool stream) {
+static uint64_t workBytes(int n, bool stream, bool counter) {
   Layer ly;
   ly.describe(n, IX.layerSize(n));
   uint64_t w = ly.bytesFor(stream ? ly.streamWorkMode() : ly.workMode(), ly.G, ly.w, ly.size);
-  w += ly.size / 512 + 4096;  // dirty bit per 8 boards
+  if (counter) {
+    w += ly.size / 2 + 64;                      // 4-bit counters
+    w += 4 * (ly.size / 8 + ly.size / 512 + 128);  // four two-level frontier bitmaps
+    if (!stream) w += capNbytes(ly.V, ly.size);
+  } else {
+    w += ly.size / 512 + 4096;  // dirty bit per 8 boards
+  }
   if (stream) {
     w += capNbytes(ly.V, ly.size);
     uint64_t mapped = 0;      // page tables for the memory-mapped lower files
@@ -712,7 +1042,7 @@ static uint64_t memAvailable() {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [seeds=48] [threads=all] [maxN=seeds] [mode=auto|ram|stream]\n"); return 1; }
+  if (argc < 2) { fprintf(stderr, "usage: solve <outdir> [seeds=48] [threads=all] [maxN=seeds] [mode=auto|ram|stream] [fix=auto|counter|sweep]\n"); return 1; }
   outDir = argv[1];
   SEEDS = argc > 2 ? atoi(argv[2]) : MAX_SEEDS;
   if (SEEDS < 2 || SEEDS > MAX_SEEDS || SEEDS % 2) {
@@ -726,6 +1056,12 @@ int main(int argc, char** argv) {
     else if (m == "stream") mode = SolveMode::STREAM;
     else if (m != "auto") { fprintf(stderr, "mode must be auto, ram or stream\n"); return 1; }
   }
+  if (argc > 6) {
+    std::string f = argv[6];
+    if (f == "counter") fixMode = FixMode::COUNTER;
+    else if (f == "sweep") fixMode = FixMode::SWEEP;
+    else if (f != "auto") { fprintf(stderr, "fix must be auto, counter or sweep\n"); return 1; }
+  }
   stripes = static_cast<Stripe*>(aligned_alloc(64, sizeof(Stripe) * (1u << STRIPES_LOG2)));
   for (int i = 0; i < (1 << STRIPES_LOG2); ++i) new (stripes + i) Stripe;  // flags start clear
   const uint64_t avail = memAvailable();
@@ -733,16 +1069,21 @@ int main(int argc, char** argv) {
   if (mode == SolveMode::AUTO && getenv("OW_BUDGET_GB"))  // testing: force the auto decision
     budgetBytes = uint64_t(atof(getenv("OW_BUDGET_GB")) * (1ull << 30));
   const int win = winSeeds();
-  printf("solving %dx2 Oware with %d seeds (%d captured seeds win) into %s, mode %s, %.0f GiB available\n",
+  printf("solving %dx2 Oware with %d seeds (%d captured seeds win) into %s, mode %s, fixpoint %s, %.0f GiB available\n",
          ROW, SEEDS, win, outDir.c_str(), mode == SolveMode::RAM ? "ram" : mode == SolveMode::STREAM ? "stream" : "auto",
-         avail / 1073741824.0);
+         fixMode == FixMode::COUNTER ? "counter" : fixMode == FixMode::SWEEP ? "sweep" : "auto", avail / 1073741824.0);
   mkdir(outDir.c_str(), 0775);
   bool everStreamed = false;
   for (int n = 0; n <= maxN; ++n) {
     if (n == SEEDS - 1) continue;  // a single seed can never be captured
     L[n].describe(n, IX.layerSize(n));
     bool stream = mode == SolveMode::STREAM || (mode == SolveMode::AUTO && everStreamed);
-    if (mode == SolveMode::AUTO && !stream && residentBytes + workBytes(n, false) > budgetBytes) stream = true;
+    // The counter fixpoint needs ~1 extra byte per board; fall back to sweeps when
+    // that does not fit the budget (in auto mode the streaming decision is made
+    // with the sweep footprint, then the counter footprint is checked).
+    if (mode == SolveMode::AUTO && !stream && residentBytes + workBytes(n, false, false) > budgetBytes) stream = true;
+    bool counter = fixMode == FixMode::COUNTER ||
+                   (fixMode == FixMode::AUTO && (stream ? 0 : residentBytes) + workBytes(n, stream, true) <= budgetBytes);
     if (stream && !everStreamed && mode == SolveMode::AUTO) {
       for (int m = 0; m < n; ++m)
         if (L[m].data) L[m].release();
@@ -752,11 +1093,11 @@ int main(int argc, char** argv) {
     }
     if (!stream) {
       if (loadLayer(n)) { printf("layer %2d: loaded\n", n); fflush(stdout); residentBytes += L[n].bytes; continue; }
-      solveLayer(n, false);
+      solveLayer(n, false, counter);
       residentBytes += L[n].bytes;
     } else {
       if (layerFileOk(n)) { printf("layer %2d: found on disk (streaming)\n", n); fflush(stdout); continue; }
-      solveLayer(n, true);
+      solveLayer(n, true, counter);
     }
   }
   if (maxN == SEEDS && SEEDS % PITS == 0) {
