@@ -1,0 +1,52 @@
+== 6x2_36 n=8 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 11015 nodes, 37875 edges; boards/node 6.9; dense 1.63e+06 B, sparse 2.4e+05 B (table 5.66e+04 B)
+  all 16 sets: 38448 nodes, 120130 edges; dense 5.69e+06 B, sparse 7.88e+05 B
+done in 0.0s
+== 6x2_36 n=10 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 56515 nodes, 214003 edges; boards/node 6.2; dense 8.36e+06 B, sparse 1.31e+06 B (table 3.07e+05 B)
+  all 20 sets: 154659 nodes, 536107 edges; dense 2.29e+07 B, sparse 3.38e+06 B
+done in 0.1s
+== 6x2_36 n=12 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 218066 nodes, 895054 edges; boards/node 6.1; dense 3.23e+07 B, sparse 5.32e+06 B (table 1.17e+06 B)
+  all 24 sets: 485577 nodes, 1869567 edges; dense 7.19e+07 B, sparse 1.14e+07 B
+done in 0.5s
+== 6x2_36 n=14 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 671241 nodes, 2995933 edges; boards/node 6.5; dense 9.93e+07 B, sparse 1.74e+07 B (table 3.83e+06 B)
+  all 28 sets: 1299194 nodes, 5583590 edges; dense 1.92e+08 B, sparse 3.27e+07 B
+done in 1.6s
+== 6x2_36 n=16 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 1792862 nodes, 8678177 edges; boards/node 7.1; dense 2.65e+08 B, sparse 4.91e+07 B (table 1.27e+07 B)
+  all 32 sets: 3247217 nodes, 15398643 edges; dense 4.81e+08 B, sparse 8.76e+07 B
+done in 4.9s
+== 6x2_36 n=18 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 4284806 nodes, 22385701 edges; boards/node 7.8; dense 6.34e+08 B, sparse 1.24e+08 B (table 3.32e+07 B)
+  all 36 sets: 7632135 nodes, 39556524 edges; dense 1.13e+09 B, sparse 2.19e+08 B
+done in 13.3s
+== 6x2_36 n=20 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 9502866 nodes, 53212178 edges; boards/node 8.4; dense 1.41e+09 B, sparse 2.89e+08 B (table 8.02e+07 B)
+  all 36 sets: 16645398 nodes, 93252005 edges; dense 2.46e+09 B, sparse 5.06e+08 B
+done in 36.1s
+== 6x2_48 n=8 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 11015 nodes, 37875 edges; boards/node 6.9; dense 2.16e+06 B, sparse 2.4e+05 B (table 5.66e+04 B)
+  all 16 sets: 38448 nodes, 120130 edges; dense 7.54e+06 B, sparse 7.88e+05 B
+done in 0.1s
+== 6x2_48 n=12 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 218066 nodes, 895054 edges; boards/node 6.1; dense 4.27e+07 B, sparse 5.32e+06 B (table 1.17e+06 B)
+  all 24 sets: 485577 nodes, 1869567 edges; dense 9.52e+07 B, sparse 1.14e+07 B
+done in 0.5s
+== 6x2_48 n=16 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 1792862 nodes, 8678177 edges; boards/node 7.1; dense 3.51e+08 B, sparse 4.91e+07 B (table 1.27e+07 B)
+  all 32 sets: 3247217 nodes, 15398643 edges; dense 6.36e+08 B, sparse 8.76e+07 B
+done in 4.5s
+== 6x2_48 n=20 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 9502943 nodes, 53212332 edges; boards/node 8.4; dense 1.86e+09 B, sparse 2.89e+08 B (table 8.02e+07 B)
+  all 40 sets: 16852562 nodes, 94492141 edges; dense 3.3e+09 B, sparse 5.13e+08 B
+done in 36.2s
+== 6x2_48 n=24 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 39595489 nodes, 250174362 edges; boards/node 9.7; dense 7.76e+09 B, sparse 1.32e+09 B (table 7.65e+08 B)
+  all 48 sets: 69558893 nodes, 444845521 edges; dense 1.36e+10 B, sparse 2.34e+09 B
+done in 228.9s
+== 6x2_36 n=24 order=0,1,2,3,4,5,6,7,8,9,10,11
+  total 38315045 nodes, 245335218 edges; boards/node 10.0; dense 5.67e+09 B, sparse 1.29e+09 B (table 3.35e+08 B)
+  all 28 sets: 64321334 nodes, 409075221 edges; dense 9.52e+09 B, sparse 2.15e+09 B
+done in 169.4s

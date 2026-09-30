@@ -1,0 +1,50 @@
+layer 14: 19980780 boards, V=15 P=120, table 17483185 bytes (0.875 bytes/board)
+order: 7 8 9 10 11 12 13 0 1 2 3 4 5 6
+multi-valued DFA (whole table, 120 terminals), built in 1.9s:
+  pos  0 (pit  7):            1 nodes             15 edges
+  pos  1 (pit  8):           15 nodes            120 edges
+  pos  2 (pit  9):          106 nodes            666 edges
+  pos  3 (pit 10):          523 nodes           2849 edges
+  pos  4 (pit 11):         2090 nodes          10251 edges
+  pos  5 (pit 12):         7191 nodes          32486 edges
+  pos  6 (pit 13):        22202 nodes          90900 edges
+  pos  7 (pit  0):        62594 nodes         246228 edges
+  pos  8 (pit  1):       165038 nodes         616101 edges
+  pos  9 (pit  2):       368356 nodes        1359376 edges
+  pos 10 (pit  3):       655751 nodes        2537096 edges
+  pos 11 (pit  4):       951804 nodes        3999040 edges
+  pos 12 (pit  5):       625505 nodes        3144340 edges
+  pos 13 (pit  6):          790 nodes            790 edges
+  total 2861966 nodes, 12040258 edges; boards/node 7.0; dense 3.32e+08 B, sparse 7.11e+07 B (table 1.75e+07 B)
+threshold sets (minimal binary DFAs; A=0, codes 0..14):
+  {gM >=  1}:       113711 nodes         588743 edges
+  {gM >=  2}:       113711 nodes         588743 edges
+  {gM >=  3}:       204966 nodes        1055915 edges
+  {gM >=  4}:       238909 nodes        1206450 edges
+  {gM >=  5}:       298306 nodes        1473009 edges
+  {gM >=  6}:       304807 nodes        1460892 edges
+  {gM >=  7}:       286920 nodes        1330757 edges
+  {gM >=  8}:       271230 nodes        1237497 edges
+  {gM >=  9}:       258640 nodes        1157159 edges
+  {gM >= 10}:       238363 nodes        1054396 edges
+  {gM >= 11}:       187922 nodes         820835 edges
+  {gM >= 12}:       175569 nodes         754766 edges
+  {gM >= 13}:        92349 nodes         390632 edges
+  {gM >= 14}:        92319 nodes         390573 edges
+  {gN >=  1}:       101960 nodes         596837 edges
+  {gN >=  2}:       101976 nodes         596958 edges
+  {gN >=  3}:       216314 nodes        1152273 edges
+  {gN >=  4}:       244540 nodes        1258634 edges
+  {gN >=  5}:       294258 nodes        1346216 edges
+  {gN >=  6}:       285291 nodes        1224180 edges
+  {gN >=  7}:       269521 nodes        1097641 edges
+  {gN >=  8}:       256923 nodes        1030062 edges
+  {gN >=  9}:       246641 nodes         954216 edges
+  {gN >= 10}:       225375 nodes         825844 edges
+  {gN >= 11}:       184445 nodes         635454 edges
+  {gN >= 12}:       169974 nodes         565230 edges
+  {gN >= 13}:       106940 nodes         322138 edges
+  {gN >= 14}:       106940 nodes         322138 edges
+  all 28 sets: 5688820 nodes, 25438188 edges; dense 6.6e+08 B, sparse 1.47e+08 B
+  indexed-board set alone: 236 nodes 1734 edges
+done in 6.9s

@@ -1,0 +1,36 @@
+layer 8: 75504 boards, V=9 P=45, table 56630 bytes (0.750 bytes/board)
+order: 0 1 2 3 4 5 6 7 8 9 10 11
+multi-valued DFA (whole table, 45 terminals), built in 0.0s:
+  pos  0 (pit  0):            1 nodes              9 edges
+  pos  1 (pit  1):            9 nodes             45 edges
+  pos  2 (pit  2):           37 nodes            153 edges
+  pos  3 (pit  3):          105 nodes            406 edges
+  pos  4 (pit  4):          269 nodes            965 edges
+  pos  5 (pit  5):          591 nodes           2039 edges
+  pos  6 (pit  6):         1190 nodes           3953 edges
+  pos  7 (pit  7):         1996 nodes           6622 edges
+  pos  8 (pit  8):         2622 nodes           8913 edges
+  pos  9 (pit  9):         2655 nodes           9400 edges
+  pos 10 (pit 10):         1421 nodes           5251 edges
+  pos 11 (pit 11):          119 nodes            119 edges
+  total 11015 nodes, 37875 edges; boards/node 6.9; dense 2.16e+06 B, sparse 2.4e+05 B (table 5.66e+04 B)
+threshold sets (minimal binary DFAs; A=0, codes 0..8):
+  {gM >=  1}:         1808 nodes           6553 edges
+  {gM >=  2}:         1808 nodes           6553 edges
+  {gM >=  3}:         2775 nodes           8241 edges
+  {gM >=  4}:         2790 nodes           8241 edges
+  {gM >=  5}:         2876 nodes           8288 edges
+  {gM >=  6}:         2986 nodes           8602 edges
+  {gM >=  7}:         2919 nodes           8062 edges
+  {gM >=  8}:         2909 nodes           8046 edges
+  {gN >=  1}:         2942 nodes          10544 edges
+  {gN >=  2}:         2944 nodes          10547 edges
+  {gN >=  3}:         2238 nodes           7400 edges
+  {gN >=  4}:         2205 nodes           7305 edges
+  {gN >=  5}:         2107 nodes           6635 edges
+  {gN >=  6}:         2107 nodes           6449 edges
+  {gN >=  7}:         1517 nodes           4332 edges
+  {gN >=  8}:         1517 nodes           4332 edges
+  all 16 sets: 38448 nodes, 120130 edges; dense 7.54e+06 B, sparse 7.88e+05 B
+  indexed-board set alone: 112 nodes 528 edges
+done in 0.1s
