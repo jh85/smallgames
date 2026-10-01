@@ -124,5 +124,18 @@ large ones: `./qwdl solve 7 7 2 --save tables/7x7_w2` is minutes, while 6x6 w=4 
 
 ## Results
 
-See `RESULTS.md` (start-position outcomes and statistics are also in
-`production.log`).
+The full WDL tables deliberately include states that cannot be reached from the
+standard initial position. The exact reachable subsets are:
+
+| configuration | reachable positions | full WDL table | reachable |
+|---|---:|---:|---:|
+| 6x6 w=3 | 18,654,053,548 | 23,916,601,800 | 77.996% |
+| 6x6 w=4 | 322,608,610,016 | 446,051,566,800 | 72.325% |
+| 7x7 w=2 | 3,677,348,176 | 4,357,291,680 | 84.395% |
+| 7x7 w=3 | 418,124,712,600 | 501,660,690,720 | 83.348% |
+
+Here `w` is the number of walls per player. Reachable counts include terminal
+positions; play stops as soon as either pawn reaches its goal row.
+
+See `RESULTS.md` for start-position outcomes and full-table statistics. They are
+also recorded in `production.log`.
