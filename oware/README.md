@@ -161,9 +161,17 @@ build/gmz stats  <lhdir> <seeds> <n>                      # entropy of the gM co
 build/probez <gmzdir> s0 ... s11 captured0 captured1 side_to_move   # same output as probe
 ```
 
-`verify` decodes the layers into memory and checks every board of the layer:
-the stored gM must equal the `.lh` value, and gN re-derived from the children
-must equal the stored gN. `probez` agrees with `probe` on random states.
+`verify` checks the stored gM of every board against the `.lh` file, and gN
+re-derived from the children against the stored gN for every board when the layers
+a probe can reach fit in memory decoded, otherwise for 10 million random boards.
+`probez` agrees with `probe` on random states, and `tools/oware_probe.py` (pure
+Python, `zstandard` module or the `zstd` command) agrees with `probez`.
+
+`tools/make_package.sh <gmzdir> <seeds> <row> <stats.txt> <outdir>` assembles a
+distributable package: `tables/*.gmz`, `SHA256SUMS`, `stats.txt`, the query programs
+with their sources and a package `Makefile`, and a README explaining the numbering,
+the values and the file format. The three published games were packaged this way
+(6.3 GB, 10.1 GB and 203 GB instead of 19.5 GB, 26.9 GB and 554 GB).
 
 Sizes: zstd on the byte-per-board blocks gets below the zeroth-order entropy of
 the gM codes (about 3.5 bits per board in the middle layers, 1.4 bits at the
@@ -174,12 +182,14 @@ mover row and have correlated values. Measured on the finished tables (every lay
 | --- | ---: | ---: | ---: |
 | 7×2/28 (28 layers) | 19.5 GB | 6.26 GB | 3.1× |
 | 6×2/36 (36 layers) | 26.9 GB | 10.1 GB | 2.7× |
-| 6×2/48 (layers 0–36 only) | 61.5 GB | 20.8 GB | 3.0× |
+| 6×2/48 (48 layers) | 553.6 GB (516 GiB) | 202.9 GB (189 GiB) | 2.7× |
 
-Per layer the ratio is 3.0× where the `.lh` file has one byte per board, 5.6–5.9× where
-it has two (layers 22–28 of 6×2/48) and 3.5× at the 7×2/28 top layer (0.096 bytes per
-board against 1/3); the full 6×2/48 table (516 GB) should come out at roughly 170 GB and
-the 7×2/42 table (2.36 TB) at roughly 700–800 GB. The `.gmz` files of the three finished games
+Per layer the ratio is 2.8–3.0× where the `.lh` file has one byte per board, 5.6–5.9×
+where it has two (layers 22–28 of 6×2/48), 3.0× at the 6×2/48 top layer (0.110 bytes per
+board against 1/3) and 3.5× at the 7×2/28 top layer; the 7×2/42 table (2.36 TB) should
+come out at roughly 850 GB. For 6×2/48 the gM check covered every board of every layer
+and the re-derived gN check every board of layers 0–30 and 10 million random boards of
+each layer above. The `.gmz` files of the three finished games
 are in `/data1/oware2/gmz/`.
 
 ## Validation

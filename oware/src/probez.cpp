@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
   cap[0] = atoi(argv[PITS + 2]); cap[1] = atoi(argv[PITS + 3]); stm = atoi(argv[PITS + 4]);
   SEEDS = tot + cap[0] + cap[1];
   if (SEEDS < 2 || SEEDS > MAX_SEEDS || SEEDS % 2 || (stm != 0 && stm != 1)) { fprintf(stderr, "invalid state\n"); return 1; }
+  if (cap[0] + cap[1] == 1) { fprintf(stderr, "impossible state: a single seed can never be captured\n"); return 1; }
   const int win = winSeeds();
   GmzReader R(T);
   Board b;
