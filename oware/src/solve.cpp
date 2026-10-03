@@ -608,13 +608,36 @@ static void solveLayer(int n, bool stream) {
   // Verification + statistics + final packing.
   Layer fin = ly;
   bool convert = ly.finalMode() != ly.mode;
-  if (convert) fin.alloc(ly.finalMode());
+  // A streamed layer lives on disk only once finished, so when it needs
+  // repacking the final bytes are written straight to the file from the pass
+  // below instead of materializing a second full-size array: for the top
+  // layers working set plus packed copy do not fit in RAM together (the
+  // double buffer OOM-killed the first n=38 attempt).  The bytes are exactly
+  // those saveLayer() would write: header, then w bytes per 8-board group,
+  // clipped to fin.bytes, zero-padded if fin.bytes extends past the groups.
+  int packFd = -1;
+  std::string packTmp;
+  if (convert && stream) {
+    fin.mode = ly.finalMode();
+    fin.bytes = Layer::bytesFor(fin.mode, fin.G, fin.w, fin.size);
+    packTmp = layerPath(outDir, n) + ".tmp";
+    packFd = open(packTmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    if (packFd < 0) { perror(packTmp.c_str()); exit(1); }
+    FileHeader fh{};
+    memcpy(fh.magic, "OWARELH1", 8);
+    fh.n = n; fh.A = fin.A; fh.V = fin.V; fh.P = fin.P; fh.mode = fin.mode; fh.G = fin.G; fh.w = fin.w;
+    fh.seeds = SEEDS; fh.size = fin.size; fh.bytes = fin.bytes;
+    if (pwrite(packFd, &fh, sizeof fh, 0) != ssize_t(sizeof fh)) { perror("pack header"); exit(1); }
+  } else if (convert) fin.alloc(ly.finalMode());
   std::vector<uint64_t> hist(ly.P, 0);
   uint64_t bad = 0;
+  const uint64_t chunks = (groups + (1 << 14) - 1) / (1 << 14);
   #pragma omp parallel
   {
     std::vector<uint64_t> h(ly.P, 0);
     uint64_t myBad = 0;
+    std::vector<uint8_t> pack;
+    if (packFd >= 0) pack.resize((size_t(1) << 14) * ly.w);
     // In streaming mode evaluate() omits capturing moves: their contribution is in
     // the stored value (capM) and in capN.  A stored fixpoint then must satisfy
     // eN == eN(stored) and eM <= eM(stored); eM(stored) >= capM holds by seeding,
@@ -624,27 +647,53 @@ static void solveLayer(int n, bool stream) {
       evaluate(IX.unrank(x, n), x, n, ly, eM, eN);
       if (streaming ? (eM > ly.decM[p] || eN != ly.decN[p]) : (eM != ly.decM[p] || eN != ly.decN[p])) ++myBad;
     };
-    #pragma omp for schedule(dynamic, 1 << 14)
-    for (uint64_t g = 0; g < groups; ++g) {
-      uint64_t acc = 0;
-      for (uint64_t x = g * 8; x < std::min(size, g * 8 + 8); ++x) {
-        int p = ly.get(x);
-        ++h[p];
-        if (ly.decM[p] + ly.decN[p] != ly.V - 1) {
-          check(x, p);
-        } else if ((x & 1023) == 0) {  // spot-check exact entries too
-          check(x, p);
+    #pragma omp for schedule(dynamic)
+    for (uint64_t c = 0; c < chunks; ++c) {
+      uint64_t g0 = c * (1 << 14), g1 = std::min(groups, g0 + (1 << 14));
+      for (uint64_t g = g0; g < g1; ++g) {
+        uint64_t acc = 0;
+        for (uint64_t x = g * 8; x < std::min(size, g * 8 + 8); ++x) {
+          int p = ly.get(x);
+          ++h[p];
+          if (ly.decM[p] + ly.decN[p] != ly.V - 1) {
+            check(x, p);
+          } else if ((x & 1023) == 0) {  // spot-check exact entries too
+            check(x, p);
+          }
+          acc |= uint64_t(p) << ((x & 7) * ly.w);
         }
-        acc |= uint64_t(p) << ((x & 7) * ly.w);
+        if (packFd >= 0) memcpy(pack.data() + (g - g0) * ly.w, &acc, ly.w);
+        else if (convert) memcpy(fin.data + g * ly.w, &acc, ly.w);
       }
-      if (convert) memcpy(fin.data + g * ly.w, &acc, ly.w);
+      if (packFd >= 0) {
+        uint64_t at = g0 * uint64_t(ly.w), len = (g1 - g0) * uint64_t(ly.w);
+        if (at + len > fin.bytes) len = at < fin.bytes ? fin.bytes - at : 0;
+        for (uint64_t done = 0; done < len;) {
+          ssize_t wr = pwrite(packFd, pack.data() + done, len - done, sizeof(FileHeader) + at + done);
+          if (wr <= 0) { perror("pack write"); exit(1); }
+          done += wr;
+        }
+      }
     }
     #pragma omp critical
     { for (int p = 0; p < ly.P; ++p) hist[p] += h[p]; bad += myBad; }
   }
   if (bad) { fprintf(stderr, "n=%d: %" PRIu64 " boards are not at a fixpoint\n", n, bad); exit(3); }
-  if (convert) { ly.release(); ly = fin; }
-  saveLayer(n);
+  if (packFd >= 0) {
+    uint64_t packed = groups * uint64_t(ly.w);
+    if (fin.bytes > packed) {  // zero tail beyond the last packed group
+      uint8_t z[8] = {};
+      if (pwrite(packFd, z, fin.bytes - packed, sizeof(FileHeader) + packed) != ssize_t(fin.bytes - packed)) {
+        perror("pack tail"); exit(1);
+      }
+    }
+    if (close(packFd) != 0 || rename(packTmp.c_str(), layerPath(outDir, n).c_str()) != 0) {
+      perror(packTmp.c_str()); exit(1);
+    }
+  } else {
+    if (convert) { ly.release(); ly = fin; }
+    saveLayer(n);
+  }
 
   // Statistics: exact boards, and W/D/L per score split.
   uint64_t exact = 0;
