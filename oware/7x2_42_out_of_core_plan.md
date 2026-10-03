@@ -10,6 +10,16 @@ group to a cache line (BITSP) so a field's 2-byte update never splits a cache li
 packed updates take their striped locks in ascending lock-id order (the original
 byte-order locking deadlocked a run).
 
+Status: third fix (2026-10-03). A streamed layer that needs repacking (BITSP working,
+BITS file: layers 38 and 39) no longer materializes the packed copy in RAM at the end
+of the solve; the verification pass writes the packed groups straight to the .tmp file
+(one buffered `pwrite` per 16384-group chunk).  The double buffer needs 842 GiB for
+n=38 and 1026 GiB for n=39 against 723 GiB of RAM — the kernel OOM-killed the first
+n=38 attempt at 09:07 on 2026-10-03, after the sweeps had converged.  Single-buffer
+peaks: 38 ≈ 596 GiB, 39 ≈ 700 GiB, 40 ≈ 576 GiB, 42 ≈ 629 GiB.  Re-validated per
+§3.6: forced streaming of 7×2/28 reproduces all 28 layer files byte for byte
+(`v28s_fix/`, `SHA256SUMS` check, `OW_CHECK_CAPTURE=1`).
+
 Status: design only, written 2026-09-22. Nothing below is implemented yet. The
 solver already supports `OWARE_ROW=7` (`build/solve7`) and a run-time seed count; the
 7×2/28 game was solved with it in 31 minutes. This document records why 7×2/42 does
