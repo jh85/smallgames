@@ -170,8 +170,8 @@ Python, `zstandard` module or the `zstd` command) agrees with `probez`.
 `tools/make_package.sh <gmzdir> <seeds> <row> <stats.txt> <outdir>` assembles a
 distributable package: `tables/*.gmz`, `SHA256SUMS`, `stats.txt`, the query programs
 with their sources and a package `Makefile`, and a README explaining the numbering,
-the values and the file format. The three published games were packaged this way
-(6.3 GB, 10.1 GB and 203 GB instead of 19.5 GB, 26.9 GB and 554 GB).
+the values and the file format. The four published games were packaged this way
+(6.3 GB, 10.1 GB, 203 GB and 787 GB instead of 19.5 GB, 26.9 GB, 554 GB and 2.36 TB).
 
 Sizes: zstd on the byte-per-board blocks gets below the zeroth-order entropy of
 the gM codes (about 3.5 bits per board in the middle layers, 1.4 bits at the
@@ -183,14 +183,17 @@ mover row and have correlated values. Measured on the finished tables (every lay
 | 7×2/28 (28 layers) | 19.5 GB | 6.26 GB | 3.1× |
 | 6×2/36 (36 layers) | 26.9 GB | 10.1 GB | 2.7× |
 | 6×2/48 (48 layers) | 553.6 GB (516 GiB) | 202.9 GB (189 GiB) | 2.7× |
+| 7×2/42 (42 layers) | 2,356 GB (2,194 GiB) | 787.5 GB (733 GiB) | 3.0× |
 
 Per layer the ratio is 2.8–3.0× where the `.lh` file has one byte per board, 5.6–5.9×
 where it has two (layers 22–28 of 6×2/48), 3.0× at the 6×2/48 top layer (0.110 bytes per
-board against 1/3) and 3.5× at the 7×2/28 top layer; the 7×2/42 table (2.36 TB) should
-come out at roughly 850 GB. For 6×2/48 the gM check covered every board of every layer
-and the re-derived gN check every board of layers 0–30 and 10 million random boards of
-each layer above. The `.gmz` files of the three finished games
-are in `/data1/oware2/gmz/`.
+board against 1/3), 3.5× at the 7×2/28 top layer and 3.4× at the 7×2/42 top layer; the
+7×2/42 table (2.36 TB) comes out at 787 GB, close to the ~850 GB estimated before the
+run. For 6×2/48 the gM check covered every board of every layer and the re-derived gN
+check every board of layers 0–30 and 10 million random boards of each layer above; for
+7×2/42 the gM check likewise covered every board of every layer, and gN every board of
+layers 0–28 and 10 million random boards of each layer above. The `.gmz` files of the
+first three games are in `/data1/oware2/gmz/`.
 
 ## Validation
 
@@ -223,12 +226,11 @@ largest layer's boards whose score is pinned down exactly (`gM + gN = n`).
 | 6×2 | 48 (4/pit) | 889,063,398,405 | 48 | 516 GB | 30.3 % | Draw, no forced win (both sides force ≥ 23) | 17.5 h |
 | 6×2 | 36 (3/pit) | 47,581,435,824 | 36 | 26.9 GB | 41.7 % | Draw, no forced win (both sides force ≥ 17) | 36 min |
 | 7×2 | 28 (2/pit) | 39,080,213,240 | 28 | 19.5 GB | 54.6 % | Draw, no forced win (first player forces ≥ 13, second ≥ 11) | 31 min |
-| 7×2 | 42 (3/pit) | 4,161,983,837,529 | 42 | ~2.36 TB | — | solving in progress | est. 4–8 days |
+| 7×2 | 42 (3/pit) | 4,161,983,837,529 | 42 | 2.36 TB | 60.0 % | Draw, no forced win (both sides force ≥ 20) | 7.2 days |
 
 File counts already skip the one impossible layer in each game (a single seed can
 never be captured, so layer `seeds − 1` does not exist: 47, 35, 27 and 41
-respectively). The 7×2/42 row will be filled in when its run finishes (top-layer
-exact %, verdict, actual time).
+respectively).
 
 ### 6×2, 48 seeds (standard Oware)
 
@@ -272,8 +274,9 @@ and score split.
 seeds (18 are needed for a draw by score, 19 to win). 41.7 % of the boards of the top layer
 are exact, against 30.3 % for the 48-seed game.
 
-A plan for the 7×2 game with 42 seeds (3 per pit; 4.16 × 10¹² boards, 2.36 TB of tables,
-more than fits in RAM) is in [7x2_42_out_of_core_plan.md](7x2_42_out_of_core_plan.md).
+The 7×2 game with 42 seeds (3 per pit; 4.16 × 10¹² boards, 2.36 TB of tables, more than
+fits in RAM) was solved with the out-of-core design of
+[7x2_42_out_of_core_plan.md](7x2_42_out_of_core_plan.md); see below.
 
 ### 7×2, 28 seeds (2 per pit)
 
@@ -284,8 +287,44 @@ the 6×2 games the opening already matters: `probe7` reports that three of the s
 moves (pits 1, 2 and 3) lose by force, pit 6 captures 6 seeds at once, and the other three
 keep the draw. 54.6 % of the top layer's boards are exact.
 
-SHA-256 digests of all three table sets (48 layer files + `stats.txt` each) are in
-[checksums/](checksums/).
+### 7×2, 42 seeds (3 per pit)
+
+`build/solve7 <outdir> 42` in the streaming mode of
+[7x2_42_out_of_core_plan.md](7x2_42_out_of_core_plan.md) (the layers past ~36 do not fit
+in RAM): 4,161,983,837,529 boards in layers 0–40 and 42 (the count matches the closed
+form) — 4.7 times the position count of the 48-seed game — 2.36 TB of tables, 7.2 days
+of solve + verify (64 threads on a 2 × EPYC 9115, peak 719 GiB RSS). The calendar time
+was 8.3 days, which includes one kernel OOM kill (the first layer-38 attempt) and the
+memory fix it prompted; the run restarted from the finished layers. **Draw with no
+forced win**, like the other three games:
+
+```
+initial position: first player forces >= 20 (or fewer), second player forces >= 20 (or fewer): DRAW (no forced win)
+```
+
+Neither side can force more than 20 of the 42 seeds by self-terminating play (21 are
+needed for a draw by score, 22 to win). The opening already matters: `probez7` reports
+that the first move from pit 0 loses by force while the other six keep the draw.
+60.0 % of the top layer's boards are exact, the highest share of the four games.
+
+| n | boards | exact | solve + verify |
+| ---: | ---: | ---: | ---: |
+| 4 | 2,380 | 78.1 % | |
+| 8 | 203,476 | 85.1 % | |
+| 12 | 5,191,732 | 61.4 % | |
+| 16 | 67,366,495 | 27.1 % | |
+| 20 | 562,765,840 | 13.6 % | 1 min |
+| 24 | 3,442,707,450 | 9.4 % | 11 min |
+| 28 | 16,692,092,600 | 8.8 % | 58 min |
+| 32 | 67,591,258,749 | 11.3 % | 3.8 h |
+| 36 | 237,078,052,484 | 21.3 % | 11.8 h |
+| 38 | 424,344,643,268 | 30.5 % | 20.6 h |
+| 39 | 562,007,350,555 | 36.3 % | 25.3 h |
+| 40 | 739,626,735,680 | 43.2 % | 26.3 h |
+| 42 | 1,258,254,741,654 | 60.0 % | 31.9 h |
+
+SHA-256 digests of the other three table sets (layer files + `stats.txt` each) are in
+[checksums/](checksums/); for 7×2/42 they ship in the package as `SHA256SUMS`.
 
 ## References
 
