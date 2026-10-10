@@ -152,6 +152,30 @@ The full table is ~34.5 GiB. `probe` reads single words with `pread`, so lookups
   the final W/L/D totals, and the paper's headline result: the initial position is a
   first-player win decided at pass 41.
 
+## Solved-board statistics
+
+`Pseudo-reachable positions` is the ZDD cardinality: canonical black-to-move encodings after
+using row-flip + color-swap symmetry for white-to-move positions. ZDD node counts include the
+two leaves, and WDL sizes include the 8 KiB header. The convergence pass is the first pass
+that found no new wins or losses.
+
+| board | pseudo-reachable positions | ZDD nodes | packed WDL size | convergence pass | wall time |
+|---|---:|---:|---:|---:|---:|
+| 3×3 | 50,496 | 1,123 | 20,816 B | 13 | <1 s |
+| 5×6 | 147,969,899,280 | 14,870 | 36,992,483,016 B (34.5 GiB) | 70 | 8.1 h |
+| 5×7 | 591,477,262,992 | 17,665 | 147,869,323,944 B (137.7 GiB) | 98 | 45.4 h |
+
+The 5×6 and 5×7 timings are wall-clock measurements with 64 threads. Final table values:
+
+| board | wins | losses | draws | initial position |
+|---|---:|---:|---:|---|
+| 3×3 | 38,883 | 11,377 | 236 | WIN for the first player |
+| 5×6 | 106,144,078,911 | 41,129,930,539 | 695,889,830 | WIN for the first player |
+| 5×7 | 411,553,026,817 | 174,780,947,125 | 5,143,289,050 | WIN for the first player |
+
+For the completed 5×7 table, a full post-run scan matched the header history and final log
+totals, with no temporary value-3 entries or nonzero padding bits.
+
 ## Results of the completed 5×6 solve (2026-07-29, 8.1 h on 2× EPYC 9115 / 64 threads)
 
 * All 69 Table A-1 per-pass counts match the paper exactly; the pass-48 entry unreadable in
