@@ -1,5 +1,6 @@
 # Local build products
 /qwdl
+/qwdl_sym
 
 # Run logs and editor scratch
 /*.log

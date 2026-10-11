@@ -50,15 +50,19 @@ Values are 2 bits per state: 0 = draw, 1 = Player1 wins, 2 = Player2 wins
 ```sh
 make            # g++ -O3 -march=native -fopenmp -std=c++17
 make test       # ./qwdl selftest 3 3 2 — cross-check vs the naive reference engine
+make qwdl_sym   # separate four-way-symmetry solver; leaves qwdl unchanged
+make test-sym   # symmetry + recomputed-top cross-checks
 ./validate_readme.sh   # reproduce all 36 reference-repo results (36/36)
 ```
 
 ## Files
 
 - `quoridor_wdl.cpp` — solver (single file, OpenMP)
+- `quoridor_wdl_sym.cpp` — symmetry-reduced solver, built as `qwdl_sym`;
+  it does not change `quoridor_wdl.cpp` or the existing table format
 - `run_production.sh` — the production sweep: 6x6 w=0..4 and 7x7 w=0..3
 - `validate_readme.sh` — reproduces the reference repo's published results
-- `checksums/*.SHA256SUMS` — per-file digests for the published tables
+- `checksums/*.SHA256SUMS` — per-file digests for completed tables
 - `tables/WxH_wN/` — saved tables: `meta.txt`, per-layer `layer_k.masks`
   (sorted u128 wall bitmasks) and `layer_k.wdl` (packed 2-bit values, one
   `blockBytes` block of 2·S² states per (config, walls-in-hand split)).
@@ -75,7 +79,23 @@ reference Rust solver, [github.com/grantslatton/quoridor-solving](https://github
 ./qwdl solve 6 6 3 --save tables/6x6_w3   # full WDL solve (all layers)
 ./qwdl selftest 3 3 2       # cross-check vs naive reference engine
 ./qwdl probe tables/6x6_w3  # interactive query of a saved table
+
+./qwdl_sym count 7 7 8      # exact four-way symmetry counts and memory estimates
+./qwdl_sym solve 7 7 4 --recompute-top  # low-memory start-outcome solve
+./qwdl_sym persistent 7 7 4 tables/7x7_w4_sym --threads 64
+./qwdl_sym probe tables/7x7_w4_sym
 ```
+
+`qwdl_sym` quotients wall configurations by left/right reflection and by
+top/bottom reflection or 180-degree rotation combined with swapping the players.
+For 7x7 w=4 this reduces 4,451,897,991 configurations to 1,112,995,030
+representatives. A normal two-layer symmetry solve would still need about 1.40 TiB,
+but `--recompute-top` generates final-layer blocks on demand and has a projected
+427.54 GiB peak. This mode deliberately does not support `--save` yet: it computes
+the start outcome by exhaustive retrograde analysis but does not retain the complete
+top-layer table. The `persistent` mode first streams that top layer to a resumable
+file, then saves every lower layer; the completed 7x7 w=4 raw table is
+1,611,374,418,659 bytes and can answer every state through `qwdl_sym probe`.
 
 Probe query format: `t p1r p1c p2r p2c l1 l2 [Hr,c Vr,c ...]` (t = 1 or 2 to move,
 coordinates row,col zero-based, walls by anchor + orientation). Prints the state's
@@ -87,7 +107,7 @@ echo "1 0 3 5 3 3 3" | ./qwdl probe tables/6x6_w3
 
 ## Downloading the tables
 
-The tables are **not** stored in this repository — 238 GB across the four solved games.
+The legacy tables are **not** stored in this repository — 238 GB across four games.
 Each `(board size, wall count)` is published as its own archive, because each
 `tables/WxH_wN/` directory is exactly what `./qwdl probe` consumes, and the games are
 wildly unequal in size: 7x7 w=2 is a 13 MB download, 7x7 w=3 over 150 times that.
@@ -120,22 +140,30 @@ layer of 7x7 w=3 is 96 GB.
 Re-solving instead of downloading is feasible for the small games and expensive for the
 large ones: `./qwdl solve 7 7 2 --save tables/7x7_w2` is minutes, while 6x6 w=4 and
 7x7 w=3 are the multi-hour, high-memory runs recorded in `production.log`
-(`w>=4` on 7x7 exceeds this machine's RAM entirely).
+(`w>=4` on 7x7 exceeds this machine's RAM with the legacy `qwdl` solver).
 
 ## Results
 
 The full WDL tables deliberately include states that cannot be reached from the
-standard initial position. The exact reachable subsets are:
+standard initial position. The start-position outcome under optimal play and the
+reachable subsets (exact except where marked estimated) are:
 
-| configuration | reachable positions | full WDL table | reachable |
-|---|---:|---:|---:|
-| 6x6 w=3 | 18,654,053,548 | 23,916,601,800 | 77.996% |
-| 6x6 w=4 | 322,608,610,016 | 446,051,566,800 | 72.325% |
-| 7x7 w=2 | 3,677,348,176 | 4,357,291,680 | 84.395% |
-| 7x7 w=3 | 418,124,712,600 | 501,660,690,720 | 83.348% |
+| configuration | start-position outcome | reachable positions | full WDL table | reachable |
+|---|---|---:|---:|---:|
+| 6x6 w=3 | Player1 wins | 18,654,053,548 | 23,916,601,800 | 77.996% |
+| 6x6 w=4 | Player1 wins | 322,608,610,016 | 446,051,566,800 | 72.325% |
+| 7x7 w=2 | Player2 wins | 3,677,348,176 | 4,357,291,680 | 84.395% |
+| 7x7 w=3 | Player2 wins | 418,124,712,600 | 501,660,690,720 | 83.348% |
+| 7x7 w=4 | Player2 wins | ~20.43 trillion (estimated) | 24,821,119,282,848 | ~82.3% (estimated) |
+| 8x8 w=2 | Player1 wins | not enumerated | 26,850,257,280 | ~85-90% (estimated) |
+| 8x8 w=3 | Player1 wins | not enumerated | 6,346,552,383,360 | ~85-90% (estimated) |
 
 Here `w` is the number of walls per player. Reachable counts include terminal
-positions; play stops as soon as either pawn reaches its goal row.
+positions; play stops as soon as either pawn reaches its goal row. The w=4 reachable
+figure and the 8x8 ranges are extrapolations, not enumerated counts. The 7x7 w=4
+four-way symmetry table has
+6,205,280,412,387 mathematical state orbits and 6,205,411,261,056 stored states; see
+`RESULTS.md` for the symmetry scheme and detailed state definition.
 
-See `RESULTS.md` for start-position outcomes and full-table statistics. They are
-also recorded in `production.log`.
+See `RESULTS.md` for full-table statistics. The outcomes and statistics are also
+recorded in `production.log`.
