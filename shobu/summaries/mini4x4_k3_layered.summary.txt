@@ -1,0 +1,10 @@
+Mini-Shobu W=4 H=4 K=3 (symmetry quotient, parallel bitmap layered WDL)
+mathematical states: 154560216098; state orbits: 9660420637 (15.999x reduction)
+all-orbit WDL: WIN=5662726323 LOSS=2935268083 DRAW=1062426231
+peak layer: 3497982528 orbits; parallel value+degree+frontiers: 7.870 GB
+layer files: 2 bits/orbit; no DTM; all 13 layers Bellman-verified
+initial state layer=12 id=35075259 value=WIN
+initial legal turns: 37; winning turns (LOSS successor): 2
+artifact: 13 files, 2415105525 bytes; headers and exact sizes audited
+runtime: 2727.8 seconds (45.5 minutes)
+SHA-256: all files hashed and independently rechecked

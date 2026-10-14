@@ -1,0 +1,8 @@
+Mini-Shobu W=4 H=4 K=2 (symmetry quotient, material-layered WDL)
+mathematical states: 437665698; state orbits: 27368761 (15.991x reduction)
+all-orbit WDL: WIN=13541334 LOSS=7325700 DRAW=6501727
+peak layer: 14909892 orbits; core arrays: 0.045 GB; peak live queue: 6069948 ids / 0.024 GB
+layer files: 2 bits/orbit; no DTM; each layer Bellman-verified
+initial state layer=8 id=709865 value=DRAW
+cross-check: all 19929651 reachable entries in mini4x4_k2_sym.wdl matched (0 errors)
+runtime: 43.1 s with OMP_NUM_THREADS=32 on this machine

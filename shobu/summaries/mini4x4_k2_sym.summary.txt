@@ -1,0 +1,9 @@
+Mini-Shobu W=4 H=4 K=2 (symmetry quotient)
+mathematical state space (<=2 stones/color/board): 437665698
+state-orbit space: 27368761 (15.991x reduction)
+reachable positions: 318765768 (72.8%), in 19929651 orbits
+reachable WIN:  168575764 positions, 10538898 orbits (max depth 117)
+reachable LOSS: 72937192 positions, 4560966 orbits (max depth 118)
+reachable DRAW: 77252812 positions, 4829787 orbits
+terminals (incl. unreachable): 1004569, stalemates: 101737
+initial state id=8134191 value=DRAW
