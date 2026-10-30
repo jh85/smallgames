@@ -7,7 +7,7 @@ import tempfile
 
 
 def run(*args, code=0):
-    result = subprocess.run(["./twixt", *map(str, args)], text=True, capture_output=True)
+    result = subprocess.run(["./twixt", *map(str, args)], text=True, capture_output=True, timeout=180)
     if result.returncode != code:
         raise AssertionError((args, result.returncode, result.stdout, result.stderr))
     return result.stdout + result.stderr
@@ -35,10 +35,42 @@ with tempfile.TemporaryDirectory(prefix="twixt-dfa-test-") as directory:
         run("--probe-dfa", path, code=1)
     path.write_bytes(original)
 
+    reference = Path(directory) / "reference.twixtdfa"
+    reference.write_bytes(original)
+    for backend, workers in [("threads", 8), ("processes", 4)]:
+        output = run("--board", "4x5", "--symbolic", "--symbolic-verify",
+                     "--workers", workers, "--parallel-backend", backend,
+                     "--parallel-min-nodes", 0, "--parallel-temp-dir", directory,
+                     "--compare-dfa", reference, "--census-seconds", 0, "--dfa-out", path)
+        assert "Exact W/L/D language equivalence passed" in output
+        assert "Verified all 304210 WDL values" in output
+        assert not list(Path(directory).glob("twixt-workers-*"))
+    output = run("--board", "3x5", "--symbolic", "--workers", 64,
+                 "--parallel-min-nodes", 0, "--symbolic-verify", "--census-seconds", 0)
+    assert "Verified all 1155 WDL values" in output
+    run("--probe-dfa", path, "--compare-dfa", reference, "--quiet")
+    corrupted_values = bytearray(original)
+    corrupted_values[84:88], corrupted_values[88:92] = corrupted_values[88:92], corrupted_values[84:88]
+    wrong_values = Path(directory) / "wrong-values.twixtdfa"
+    wrong_values.write_bytes(corrupted_values)
+    run("--probe-dfa", wrong_values, "--compare-dfa", reference, "--quiet", code=1)
+    run("--symbolic", "--workers", 0, code=1)
+    run("--symbolic", "--workers", 65, code=1)
+    run("--symbolic", "--parallel-backend", "invalid", code=1)
+    run("--strong", "--workers", 2, code=1)
+    run("--compare-dfa", reference, code=1)
+
     capped = Path(directory) / "capped.twixtdfa"
     run("--size", 5, "--symbolic", "--dfa-max-nodes", 64,
         "--census-seconds", 0, "--dfa-out", capped, code=3)
     assert not capped.exists()
+    for backend in ["threads", "processes"]:
+        output = run("--size", 6, "--symbolic", "--workers", 4,
+                     "--parallel-backend", backend, "--parallel-min-nodes", 0,
+                     "--parallel-temp-dir", directory, "--census-seconds", 0.05,
+                     "--dfa-out", capped, "--dfa-checkpoint", Path(directory) / "cap.twixtckp", code=3)
+        assert not capped.exists()
+        assert not list(Path(directory).glob("twixt-workers-*"))
     run("--symbolic-ply", 3, "--dfa-out", capped, code=1)
     run("--symbolic-verify", code=1)
     run("--symbolic", "--strong", code=1)
@@ -47,8 +79,12 @@ with tempfile.TemporaryDirectory(prefix="twixt-dfa-test-") as directory:
     output = run("--board", "4x5", "--symbolic-ply", 4,
                  "--dfa-checkpoint", checkpoint, "--census-seconds", 0)
     assert "no WDL solution claimed" in output
+    output = run("--board", "4x5", "--symbolic-ply", 4, "--workers", 64,
+                 "--parallel-min-nodes", 0, "--compare-dfa", checkpoint, "--census-seconds", 0)
+    assert "Exact reachable/terminal/active language equivalence passed" in output
     run("--probe-dfa", checkpoint, code=1)
-    resumed = run("--resume-dfa", checkpoint, "--symbolic-verify",
+    resumed = run("--resume-dfa", checkpoint, "--symbolic-verify", "--workers", 8,
+                  "--parallel-min-nodes", 0,
                   "--dfa-checkpoint", checkpoint, "--census-seconds", 0,
                   "--dfa-out", path)
     assert "Verified all 304210 WDL values" in resumed

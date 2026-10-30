@@ -108,7 +108,7 @@ class SymbolicTwixt {
     }
   }
 
-  void collect(std::initializer_list<DfaId*> extra = {}, bool values_only = false) {
+  void collect_roots(const std::vector<DfaId*>& extra, bool values_only = false) {
     std::vector<DfaId*> roots;
     for (auto& layer : layers_) {
       roots.push_back(&layer.reachable);
@@ -124,8 +124,12 @@ class SymbolicTwixt {
       }
     }
     roots.insert(roots.end(), extra.begin(), extra.end());
-    dfa_.collect(roots);
+    dfa_.collect(roots, options_.workers);
     collected_size_ = dfa_.size();
+  }
+
+  void collect(std::initializer_list<DfaId*> extra = {}, bool values_only = false) {
+    collect_roots(std::vector<DfaId*>(extra), values_only);
   }
 
   void maybe_collect(std::initializer_list<DfaId*> extra) {
@@ -254,6 +258,221 @@ class SymbolicTwixt {
     layer.active = dfa_.difference(reachable, dfa_.unite(layer.terminal_loss, layer.terminal_draw));
   }
 
+  struct PlacementTask {
+    int move = 0;
+    SymbolWord cube;
+  };
+
+  bool use_workers(std::size_t ply) const {
+    return options_.workers > 1 &&
+           dfa_.reachable_nodes(layers_[ply].active) >= options_.parallel_min_nodes;
+  }
+
+  // Cubes are disjoint and cover the active language. Restrict only PEG
+  // variables: translating a parent cube to child coordinates then changes
+  // just the placed peg, even when the move creates several links.
+  std::vector<PlacementTask> placement_tasks(std::size_t ply) {
+    std::vector<int> moves;
+    for (int cell = 0; cell < game_.cell_count(); ++cell) {
+      if (game_.legal_cell(cell, turn(ply))) moves.push_back(cell);
+    }
+    const std::size_t wanted = (options_.workers + moves.size() - 1) / moves.size();
+    std::vector<SymbolWord> cubes{dfa_.unrestricted()};
+    for (unsigned level = 0; level < variables_.size() && cubes.size() < wanted; ++level) {
+      if (variables_[level].link || variables_[level].index < 0) continue;
+      std::vector<SymbolWord> split;
+      for (const auto& cube : cubes) {
+        for (unsigned symbol = 0; symbol < 3; ++symbol) {
+          auto restricted = cube;
+          restricted[level] = static_cast<std::uint8_t>(1U << symbol);
+          if (dfa_.filter(layers_[ply].active, restricted) != 0) split.push_back(std::move(restricted));
+        }
+      }
+      cubes = std::move(split);
+    }
+    std::vector<PlacementTask> tasks;
+    for (const auto& cube : cubes) {
+      for (int move : moves) {
+        if ((cube[cell_level_[move]] & 1) != 0) tasks.push_back({move, cube});
+      }
+    }
+    std::cout << "Parallel ply " << ply << ": " << options_.workers << " worker ceiling, "
+              << tasks.size() << " tasks, " << cubes.size() << " disjoint peg shards\n";
+    return tasks;
+  }
+
+  twixt_dfa::ProcessOptions process_options() const {
+    return {options_.workers, options_.parallel_memory_gb * (1ULL << 30),
+             options_.parallel_temp_directory, !options_.parallel_processes};
+  }
+
+  DfaId balanced_union(std::vector<DfaId> roots) {
+    roots.erase(std::remove(roots.begin(), roots.end(), 0), roots.end());
+    if (roots.empty()) return 0;
+    while (roots.size() > 1) {
+      std::vector<DfaId> next;
+      next.reserve((roots.size() + 1) / 2);
+      for (std::size_t i = 0; i < roots.size(); i += 2) {
+        next.push_back(i + 1 == roots.size() ? roots[i] : dfa_.unite(roots[i], roots[i + 1]));
+      }
+      roots = std::move(next);
+    }
+    return roots[0];
+  }
+
+  // Expand a small prefix of the union automaton, solve independent suffix
+  // languages in parallel, and stitch the prefix once. In particular the final
+  // large union is parallel too; a binary reduction tree would serialize it.
+  DfaId parallel_union(std::vector<DfaId>& roots, const std::vector<DfaId*>& extra = {}) {
+    (void)extra;  // no GC until the complete operation/wave has finished
+    if (options_.parallel_processes) return balanced_union(roots);
+    struct SignatureHash {
+      std::size_t operator()(const std::vector<DfaId>& ids) const {
+        std::uint64_t h = 0;
+        for (DfaId id : ids) h = twixt_dfa::hash64(h ^ id);
+        return h;
+      }
+    };
+    struct Prefix {
+      std::vector<DfaId> roots;
+      std::array<std::size_t, 3> children{};
+      unsigned level = 0;
+      DfaId result = 0;
+      bool expanded = false;
+    };
+    std::vector<Prefix> prefix;
+    std::unordered_map<std::vector<DfaId>, std::size_t, SignatureHash> known;
+    auto make = [&](std::vector<DfaId> ids, std::vector<std::size_t>& frontier) {
+      ids.erase(std::remove(ids.begin(), ids.end(), 0), ids.end());
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+      const auto found = known.find(ids);
+      if (found != known.end()) return found->second;
+      const std::size_t index = prefix.size();
+      known.emplace(ids, index);
+      prefix.push_back(Prefix{});
+      prefix[index].roots = std::move(ids);
+      if (prefix[index].roots.size() <= 1) {
+        prefix[index].result = prefix[index].roots.empty() ? 0 : prefix[index].roots[0];
+      } else {
+        prefix[index].level = dfa_.node(prefix[index].roots[0]).level;
+        frontier.push_back(index);
+      }
+      return index;
+    };
+    std::vector<std::size_t> frontier;
+    make(roots, frontier);
+    while (!frontier.empty() && frontier.size() < options_.workers) {
+      std::vector<std::size_t> next;
+      for (std::size_t index : frontier) {
+        const unsigned level = prefix[index].level;
+        prefix[index].expanded = true;
+        for (unsigned c = 0; c < dfa_.alphabet()[level]; ++c) {
+          std::vector<DfaId> children;
+          for (DfaId root : prefix[index].roots) children.push_back(dfa_.node(root).next[c]);
+          const std::size_t child = make(std::move(children), next);
+          prefix[index].children[c] = child;
+        }
+      }
+      frontier = std::move(next);
+    }
+    twixt_dfa::thread_jobs(dfa_, process_options(), frontier.size(), 1,
+        [&](std::size_t job) { return std::vector<DfaId>{balanced_union(prefix[frontier[job]].roots)}; },
+        [&](std::size_t job, const std::vector<DfaId>& result) { prefix[frontier[job]].result = result[0]; },
+        []() {});
+    for (std::size_t index = prefix.size(); index-- > 0;) {
+      if (!prefix[index].expanded) continue;
+      twixt_dfa::Children children{};
+      for (unsigned c = 0; c < dfa_.alphabet()[prefix[index].level]; ++c) {
+        children[c] = prefix[prefix[index].children[c]].result;
+      }
+      prefix[index].result = dfa_.intern(prefix[index].level, children);
+    }
+    return prefix[0].result;
+  }
+
+  void print_parallel_stats(const char* phase, std::size_t ply,
+                             const twixt_dfa::ProcessStats& stats) const {
+    std::cout << "Parallel " << phase << " ply " << ply << ": wall=" << stats.seconds
+              << " s, import=" << stats.import_seconds << " s, merge/GC=" << stats.merge_seconds
+              << " s, worker_slots=" << stats.peak_workers
+              << ", peak_active_workers=" << stats.peak_active_workers << ", peak_PSS_GiB="
+              << stats.peak_memory_bytes / static_cast<double>(1ULL << 30)
+              << ", delta_MiB=" << stats.delta_bytes / static_cast<double>(1ULL << 20) << '\n';
+  }
+
+  DfaId parallel_forward(std::size_t ply) {
+    const auto tasks = placement_tasks(ply);
+    collect();
+    DfaId next = 0;
+    std::vector<DfaId> wave(tasks.size());
+    double union_seconds = 0, gc_seconds = 0;
+    std::size_t pool_before_gc = 0;
+    const auto stats = twixt_dfa::parallel_jobs(dfa_, process_options(), tasks.size(), 1,
+        [&](std::size_t job) {
+          const auto& task = tasks[job];
+          const DfaId source = dfa_.filter(layers_[ply].active, task.cube);
+          return std::vector<DfaId>{image(source, task.move, turn(ply))};
+        },
+        [&](std::size_t job, const std::vector<DfaId>& roots) { wave[job] = roots[0]; },
+        [&]() {
+          const auto union_started = std::chrono::steady_clock::now();
+          wave.push_back(next);
+          next = parallel_union(wave);
+          wave.assign(tasks.size(), 0);
+          union_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - union_started).count();
+          pool_before_gc = std::max(pool_before_gc, dfa_.size());
+          const auto gc_started = std::chrono::steady_clock::now();
+          collect({&next});
+          gc_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - gc_started).count();
+        });
+    print_parallel_stats("forward", ply, stats);
+    std::cout << "  union=" << union_seconds << " s, GC=" << gc_seconds
+              << " s, transient_pool_nodes=" << pool_before_gc << '\n';
+    return next;
+  }
+
+  void parallel_retrograde(std::size_t ply) {
+    const auto tasks = placement_tasks(ply);
+    DfaId to_loss = 0, to_nonwin = 0;
+    DfaId nonwin = dfa_.unite(layers_[ply + 1].loss, layers_[ply + 1].draw);
+    collect({&nonwin});
+    std::vector<DfaId> loss_wave(tasks.size()), nonwin_wave(tasks.size());
+    const auto stats = twixt_dfa::parallel_jobs(dfa_, process_options(), tasks.size(), 2,
+        [&](std::size_t job) {
+          const auto& task = tasks[job];
+          const DfaId active = dfa_.filter(layers_[ply].active, task.cube);
+          if (active == 0) return std::vector<DfaId>{0, 0};
+          SymbolWord child_cube = task.cube;
+          child_cube[cell_level_[task.move]] = static_cast<std::uint8_t>(1U << color(turn(ply)));
+          const DfaId target_loss = dfa_.filter(layers_[ply + 1].loss, child_cube);
+          DfaId loss = preimage(target_loss, task.move, turn(ply));
+          loss = dfa_.intersect(loss, active);
+          const DfaId target_nonwin = dfa_.filter(nonwin, child_cube);
+          DfaId other = preimage(target_nonwin, task.move, turn(ply));
+          other = dfa_.intersect(other, active);
+          return std::vector<DfaId>{loss, other};
+        },
+        [&](std::size_t job, const std::vector<DfaId>& roots) {
+          loss_wave[job] = roots[0];
+          nonwin_wave[job] = roots[1];
+        },
+        [&]() {
+          loss_wave.push_back(to_loss); nonwin_wave.push_back(to_nonwin);
+          std::vector<DfaId*> other_roots{&nonwin};
+          for (auto& root : nonwin_wave) other_roots.push_back(&root);
+          to_loss = parallel_union(loss_wave, other_roots);
+          to_nonwin = parallel_union(nonwin_wave, {&nonwin, &to_loss});
+          loss_wave.assign(tasks.size(), 0); nonwin_wave.assign(tasks.size(), 0);
+          collect({&to_loss, &to_nonwin, &nonwin});
+        });
+    print_parallel_stats("retrograde", ply, stats);
+    layers_[ply].win = to_loss;
+    layers_[ply].loss = dfa_.unite(layers_[ply].loss, dfa_.difference(layers_[ply].active, to_nonwin));
+    layers_[ply].draw = dfa_.difference(layers_[ply].reachable,
+                            dfa_.unite(layers_[ply].win, layers_[ply].loss));
+  }
+
   bool forward() {
     if (layers_.empty()) add_layer(dfa_.singleton(encode(root_)));
     std::cout << "Symbolic forward generation (no symmetry; dead-draw descendants retained)\n"
@@ -271,12 +490,16 @@ class SymbolicTwixt {
         return false;
       }
       DfaId next = 0;
-      for (int cell = 0; cell < game_.cell_count(); ++cell) {
-        if (!game_.legal_cell(cell, turn(ply))) continue;
-        // collect changes all root IDs; access the source again each time.
-        const DfaId child = image(layers_[ply].active, cell, turn(ply));
-        next = dfa_.unite(next, child);
-        maybe_collect({&next});
+      if (use_workers(ply)) {
+        next = parallel_forward(ply);
+      } else {
+        for (int cell = 0; cell < game_.cell_count(); ++cell) {
+          if (!game_.legal_cell(cell, turn(ply))) continue;
+          // collect changes all root IDs; access the source again each time.
+          const DfaId child = image(layers_[ply].active, cell, turn(ply));
+          next = dfa_.unite(next, child);
+          maybe_collect({&next});
+        }
       }
       if (next == 0) throw std::logic_error("active language has no successors");
       add_layer(next);
@@ -298,6 +521,9 @@ class SymbolicTwixt {
       layers_[ply].draw = layers_[ply].terminal_draw;
       if (layers_[ply].active != 0) {
         if (ply + 1 == layers_.size()) throw std::logic_error("incomplete final symbolic layer");
+        if (use_workers(ply)) {
+          parallel_retrograde(ply);
+        } else {
         DfaId to_loss = 0, to_nonwin = 0;
         DfaId nonwin = dfa_.unite(layers_[ply + 1].loss, layers_[ply + 1].draw);
         for (int cell = 0; cell < game_.cell_count(); ++cell) {
@@ -315,6 +541,7 @@ class SymbolicTwixt {
                                       dfa_.difference(layers_[ply].active, to_nonwin));
         layers_[ply].draw = dfa_.difference(layers_[ply].reachable,
                                dfa_.unite(layers_[ply].win, layers_[ply].loss));
+        }
       }
       layers_[ply].reachable = layers_[ply].active = 0;
       layers_[ply].terminal_loss = layers_[ply].terminal_draw = 0;
@@ -632,6 +859,61 @@ class SymbolicDatabase {
   std::unique_ptr<SymbolicTwixt> solution_;
 };
 
+void compare_symbolic(const Twixt& game, SymbolicTwixt& solution, const std::string& path) {
+  Options read_options;
+  read_options.census_seconds = 0;
+  read_options.dfa_max_nodes = 0;
+  SymbolicDatabase reference(path, &read_options);
+  if (reference.width() != game.width() || reference.height() != game.height() ||
+      reference.solution().layers().size() != solution.layers().size() ||
+      !(game.canonical_key(reference.solution().root_state(), false) ==
+        game.canonical_key(solution.root_state(), false))) {
+    throw std::invalid_argument("DFA comparison has a different geometry, root, or layer count");
+  }
+  const auto& left = solution.manager();
+  const auto& right = reference.solution().manager();
+  const DfaId unknown = std::numeric_limits<DfaId>::max();
+  std::vector<DfaId> mapped(left.size(), unknown);
+  mapped[0] = 0; mapped[1] = 1;
+  std::vector<std::pair<DfaId, DfaId>> pending;
+  const bool reachability = reference.phase() == 0;
+  if (reference.phase() == 1) throw std::invalid_argument("compare a forward checkpoint or a completed solution");
+  for (std::size_t ply = 0; ply < solution.layers().size(); ++ply) {
+    const auto& a = solution.layers()[ply];
+    const auto& b = reference.solution().layers()[ply];
+    if (reachability) {
+      if (a.reachable == 0) throw std::invalid_argument("forward checkpoint comparison needs reachable layers");
+      pending.emplace_back(a.reachable, b.reachable);
+      pending.emplace_back(a.terminal_loss, b.terminal_loss);
+      pending.emplace_back(a.terminal_draw, b.terminal_draw);
+      pending.emplace_back(a.active, b.active);
+    } else {
+      if (a.win == 0 && a.loss == 0 && a.draw == 0) {
+        throw std::invalid_argument("completed solution comparison needs solved W/L/D layers");
+      }
+      pending.emplace_back(a.win, b.win); pending.emplace_back(a.loss, b.loss);
+      pending.emplace_back(a.draw, b.draw);
+    }
+  }
+  std::uint64_t checked = 0;
+  while (!pending.empty()) {
+    const auto [a, b] = pending.back(); pending.pop_back();
+    if (mapped[a] != unknown) {
+      if (mapped[a] != b) throw std::logic_error("DFA W/L/D languages differ");
+      continue;
+    }
+    if (b < 2 || left.node(a).level != right.node(b).level) {
+      throw std::logic_error("DFA W/L/D languages differ");
+    }
+    mapped[a] = b;
+    for (unsigned c = 0; c < 3; ++c) pending.emplace_back(left.node(a).next[c], right.node(b).next[c]);
+    if (((++checked) & 0x3fffULL) == 0) solution.check_time();
+  }
+  std::cout << "Exact " << (reachability ? "reachable/terminal/active" : "W/L/D")
+            << " language equivalence passed against " << path << " ("
+            << checked << " shared DFA nodes checked).\n";
+}
+
 void probe_symbolic(const Twixt& game, const State& state,
                     SymbolicTwixt& solution, bool quiet) {
   const int ply = peg_count(state) - peg_count(solution.root_state());
@@ -665,6 +947,7 @@ bool run_symbolic(const Twixt& game, const State& root, const Options& options,
       solution.retrograde(resumed && resumed->phase() == 1 ? resumed->remaining() :
                           std::numeric_limits<std::size_t>::max());
     }
+    if (!options.compare_dfa.empty()) compare_symbolic(game, solution, options.compare_dfa);
     if (options.symbolic_verify) verify_symbolic(solution, game, root, options, completed);
     if (!completed) {
       std::cout << "Symbolic census completed through ply " << options.symbolic_ply

@@ -195,10 +195,10 @@ Resuming the 5x6 checkpoint reached ply 11 with 149,777,156 positions in
 2,874,329 DFA states (52.1 positions per node); that additional layer took about
 167 seconds, including checkpoint overhead.
 
-The preserved `tables/5x6-working.twixtckp` contains complete reachable layers
-0--11 (262,665,577 positions across layers). The capped attempt did not finish
-layer 12 and produced no 5x6 WDL solution. Continue it with a larger pool and
-time allowance, without regenerating the completed layers:
+The first capped 5x6 run completed reachable layers 0--11 (262,665,577 positions
+across layers), then stopped during layer 12 without a WDL solution. The working
+checkpoint has since advanced. Checkpoints can continue with a larger pool and
+time allowance, without regenerating their completed layers:
 
 ```sh
 ./twixt --resume-dfa tables/5x6-working.twixtckp \
@@ -206,6 +206,97 @@ time allowance, without regenerating the completed layers:
   --dfa-checkpoint tables/5x6-working.twixtckp \
   --dfa-out tables/5x6.twixtdfa
 ```
+
+## Parallel symbolic solving
+
+`--workers N` enables up to 64 symbolic worker threads (default: 1). Existing
+solutions and checkpoints are compatible with every worker count, so a serial
+run can resume in parallel without repeating its completed layers:
+
+```sh
+./twixt --resume-dfa tables/5x6-working.twixtckp --workers 64 \
+  --dfa-max-nodes 1000000000 --census-seconds 86400 \
+  --parallel-memory-gb 512 \
+  --dfa-checkpoint tables/5x6-working.twixtckp \
+  --dfa-out tables/5x6.twixtdfa
+```
+
+The parallel implementation covers forward placement images, retrograde
+preimages, union suffixes, and DFA compaction/registry cleanup. The node array
+uses stable blocks, interning uses sharded locks, and operation caches are
+private to each worker with a bounded shared product cache. Small reservations
+of node IDs reduce allocator contention; unused reservations disappear during
+compaction. Every published child still precedes its parent, preserving the
+portable file format and exact minimization invariants.
+
+Disjoint peg-prefix shards create enough placement jobs when there are fewer
+legal holes than workers. Large unions are split into independent suffix
+languages and their prefix automaton is reconstructed exactly. No peg/link
+histories are approximated or dropped. Connection recognition, input loading,
+parts of collection, and checkpoint I/O retain serial work, so speedup need not
+scale linearly with the worker count. On this machine 64 logical CPUs share
+32 physical cores; compare 8, 32, and 64 workers for the board/layer of interest.
+
+`--parallel-min-nodes N` avoids worker overhead below N active DFA nodes
+(default: 20,000; use 0 to exercise parallelism on tiny tests).
+`--parallel-memory-gb N` sets the Linux PSS monitor's process/worker memory
+budget (default: 512 GiB; 0 disables). It is sampled during worker computation,
+not a kernel-enforced bound; collection/checkpoint peaks can require additional
+space. The local production wrapper also imposes a 512 GiB virtual-memory
+limit. Worker errors and resource caps cancel/join the remaining workers and
+leave the last completed checkpoint intact.
+
+`--parallel-backend processes` selects the alternative POSIX fork backend.
+It shares immutable snapshots by copy-on-write and returns validated node
+deltas for import at wave barriers. `--parallel-temp-dir PATH` selects its
+scratch directory (default: `tables`). Temporary deltas are removed on normal
+completion and handled failures; Linux workers receive a parent-death signal
+if the coordinator is killed. The thread backend avoids delta files/imports
+and is the default.
+
+`--compare-dfa PATH` checks exact DFA-language equivalence, rather than sampling
+positions. For completed solutions it compares every W/L/D set; for bounded
+forward runs it compares reachable, terminal, and active sets to a serial
+forward checkpoint. For example:
+
+```sh
+./twixt --size 6 --symbolic-ply 8 --workers 1 --census-seconds 0 \
+  --dfa-max-nodes 200000000 \
+  --dfa-checkpoint tables/6x6-serial.twixtckp
+./twixt --size 6 --symbolic-ply 8 --workers 64 --census-seconds 0 \
+  --dfa-max-nodes 200000000 \
+  --compare-dfa tables/6x6-serial.twixtckp
+```
+
+The 64-worker complete 5x5 solve reproduced all W/L/D languages in the
+independently verified serial solution: 60,535,612 covered positions,
+8,388,377 shared nodes, and a 55,171,387-byte artifact. It finished in 324.40
+seconds including comparison and checkpoints, peaking at 18,562,096 KiB RSS.
+This is a new clean parallel run, not a comparison against the earlier staged
+development timings.
+
+One release binary generated 6x6 reachable layers 0--8 at each worker count:
+
+| Workers | Generation seconds | Speedup | Peak RSS, GiB |
+|---:|---:|---:|---:|
+| 1 | 105.736 | 1.00x | 1.05 |
+| 8 | 56.406 | 1.87x | 2.62 |
+| 32 | 52.868 | 2.00x | 7.43 |
+| 64 | 50.267 | 2.10x | 13.27 |
+
+Generation times include checkpoints and exclude the final comparison. Every
+parallel checkpoint exactly matched the serial reachable/terminal/active sets:
+96,701,369 positions across layers, including 77,052,264 at ply 8. This is a
+reachability benchmark, not a complete 6x6 strong solution. The production 5x6
+serial run occupied one CPU throughout these measurements. Union and collection
+remain significant costs; 64 workers do not imply a 64-fold speedup.
+
+Tests cover both worker backends, 64-way node publication across block
+boundaries, exact small-board values, cross-worker checkpoint restarts,
+corrupted value-language comparisons, and failure/timeout cleanup. Address
+and undefined-behavior sanitizer checks are also run. ThreadSanitizer could
+not start on this host (`unexpected memory mapping`), so no ThreadSanitizer
+pass is claimed.
 
 ## Explicit analysis modes
 
@@ -406,7 +497,8 @@ sha256sum tables/5x6.twixtdb
 
 - `twixt.cpp` - solver, census, strong retrograde, WDL writer, and WDL probe.
 - `symbolic_dfa.hpp` - exact DFA set algebra, filtering, counting, and collection.
+- `parallel_dfa.hpp` - shared-memory workers, process fallback, and delta transfer.
 - `twixt_symbolic.hpp` - symbolic TwixT moves, terminal sets, retrograde, and files.
-- `symbolic_dfa_test.cpp`, `test_symbolic.py` - independent symbolic regression tests.
+- `symbolic_dfa_test.cpp`, `parallel_dfa_test.cpp`, `test_symbolic.py` - regression tests.
 - `Makefile` - optimized build plus short tests.
 - `README.md` - rules, reproducibility instructions, format, and checksums.

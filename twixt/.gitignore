@@ -1,5 +1,6 @@
 /twixt
 /symbolic_dfa_test
+/parallel_dfa_test
 /*.twixtdfa
 /*.twixtckp
 /*.partial

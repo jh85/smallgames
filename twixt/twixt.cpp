@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "symbolic_dfa.hpp"
+#include "parallel_dfa.hpp"
 
 
 namespace {
@@ -137,10 +138,16 @@ struct Options {
   bool symbolic_verify = false;
   int symbolic_ply = -1;
   std::size_t dfa_max_nodes = 5'000'000;
+  unsigned workers = 1;
+  std::size_t parallel_min_nodes = 20'000;
+  std::uint64_t parallel_memory_gb = 512;
+  std::string parallel_temp_directory = "tables";
+  bool parallel_processes = false;
   std::string dfa_out;
   std::string probe_dfa;
   std::string dfa_checkpoint;
   std::string resume_dfa;
+  std::string compare_dfa;
   std::string db_out;
   std::string probe_db;
 };
@@ -1691,8 +1698,14 @@ void print_help(const char* program) {
       << "  --symbolic-ply N      generate DFA reachable layers only, through ply N\n"
       << "  --symbolic-verify     compare a symbolic solve/probe to explicit analysis\n"
       << "  --dfa-max-nodes N     cap shared DFA pool including intermediates (default: 5M)\n"
+      << "  --workers N           parallel symbolic workers, 1..64 (default: 1)\n"
+      << "  --parallel-backend B  threads (default) or processes\n"
+      << "  --parallel-min-nodes N use workers when active DFA has at least N nodes (default: 20000)\n"
+      << "  --parallel-memory-gb N aggregate worker PSS cap in GiB; 0 disables (default: 512)\n"
+      << "  --parallel-temp-dir PATH temporary worker deltas (default: tables)\n"
       << "  --dfa-out PATH        save a completed symbolic WDL solution\n"
       << "  --probe-dfa PATH      query a symbolic solution at --moves\n"
+      << "  --compare-dfa PATH    compare exact languages with a solution/forward checkpoint\n"
       << "  --dfa-checkpoint PATH atomically checkpoint each symbolic layer\n"
       << "  --resume-dfa PATH     resume a checkpoint (uses a fresh time budget)\n"
       << "  --census-max-states N stop before a layer exceeds N states (default: 1M)\n"
@@ -1762,10 +1775,31 @@ Options parse_options(int argc, char** argv) {
       options.symbolic_verify = true;
     } else if (arg == "--dfa-max-nodes") {
       options.dfa_max_nodes = parse_size_t(value("--dfa-max-nodes"), "--dfa-max-nodes");
+    } else if (arg == "--workers") {
+      const auto count = parse_size_t(value("--workers"), "--workers");
+      if (count == 0 || count > 64) throw std::invalid_argument("--workers must be 1..64");
+      options.workers = static_cast<unsigned>(count);
+    } else if (arg == "--parallel-min-nodes") {
+      options.parallel_min_nodes = parse_size_t(value("--parallel-min-nodes"), "--parallel-min-nodes");
+    } else if (arg == "--parallel-memory-gb") {
+      options.parallel_memory_gb = parse_size_t(value("--parallel-memory-gb"), "--parallel-memory-gb");
+      if (options.parallel_memory_gb > std::numeric_limits<std::uint64_t>::max() / (1ULL << 30)) {
+        throw std::invalid_argument("--parallel-memory-gb is too large");
+      }
+    } else if (arg == "--parallel-temp-dir") {
+      options.parallel_temp_directory = value("--parallel-temp-dir");
+    } else if (arg == "--parallel-backend") {
+      const std::string backend = value("--parallel-backend");
+      if (backend != "threads" && backend != "processes") {
+        throw std::invalid_argument("--parallel-backend must be threads or processes");
+      }
+      options.parallel_processes = backend == "processes";
     } else if (arg == "--dfa-out") {
       options.dfa_out = value("--dfa-out");
     } else if (arg == "--probe-dfa") {
       options.probe_dfa = value("--probe-dfa");
+    } else if (arg == "--compare-dfa") {
+      options.compare_dfa = value("--compare-dfa");
     } else if (arg == "--dfa-checkpoint") {
       options.dfa_checkpoint = value("--dfa-checkpoint");
     } else if (arg == "--resume-dfa") {
@@ -1841,6 +1875,13 @@ int run(int argc, char** argv) {
   }
   if (options.symbolic_ply >= 0 && options.expected.has_value()) {
     throw std::invalid_argument("--expect requires a complete solve, not --symbolic-ply");
+  }
+  if (options.workers > 1 && !options.symbolic) {
+    throw std::invalid_argument("--workers requires --symbolic or --symbolic-ply or --resume-dfa");
+  }
+  if (!options.compare_dfa.empty() &&
+      (!options.symbolic && options.probe_dfa.empty())) {
+    throw std::invalid_argument("--compare-dfa requires symbolic analysis or --probe-dfa");
   }
   if (options.symbolic || options.symbolic_verify) std::cout << std::unitbuf;
   std::unique_ptr<SymbolicDatabase> resumed;
@@ -1931,6 +1972,7 @@ int run(int argc, char** argv) {
   }
 
   if (symbolic_database) {
+    if (!options.compare_dfa.empty()) compare_symbolic(game, symbolic_database->solution(), options.compare_dfa);
     if (options.symbolic_verify) {
       verify_symbolic(symbolic_database->solution(), game,
                       symbolic_database->solution().root_state(), options, true);
