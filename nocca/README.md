@@ -164,17 +164,21 @@ that found no new wins or losses.
 | 3×3 | 50,496 | 1,123 | 20,816 B | 13 | <1 s |
 | 5×6 | 147,969,899,280 | 14,870 | 36,992,483,016 B (34.5 GiB) | 70 | 8.1 h |
 | 5×7 | 591,477,262,992 | 17,665 | 147,869,323,944 B (137.7 GiB) | 98 | 45.4 h |
+| 5×8 | 1,988,872,169,856 | 20,460 | 497,218,050,656 B (463.1 GiB) | 125 | 133.1 h |
 
-The 5×6 and 5×7 timings are wall-clock measurements with 64 threads. Final table values:
+The 5×6, 5×7, and 5×8 timings are wall-clock measurements with 64 threads. Final table
+values:
 
 | board | wins | losses | draws | initial position |
 |---|---:|---:|---:|---|
 | 3×3 | 38,883 | 11,377 | 236 | WIN for the first player |
 | 5×6 | 106,144,078,911 | 41,129,930,539 | 695,889,830 | WIN for the first player |
 | 5×7 | 411,553,026,817 | 174,780,947,125 | 5,143,289,050 | WIN for the first player |
+| 5×8 | 1,343,915,099,716 | 610,340,986,147 | 34,616,083,993 | DRAW |
 
-For the completed 5×7 table, a full post-run scan matched the header history and final log
-totals, with no temporary value-3 entries or nonzero padding bits.
+For the completed tables, header history totals match the final logs. Quick publication-time
+checks also verified exact file lengths, zero padding bits, no temporary value-3 entries in
+sampled positions, and the expected initial-position values (WIN/WIN/DRAW for 5×6/5×7/5×8).
 
 ## Results of the completed 5×6 solve (2026-07-29, 8.1 h on 2× EPYC 9115 / 64 threads)
 
