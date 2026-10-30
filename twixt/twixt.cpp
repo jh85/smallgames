@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -21,6 +22,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "symbolic_dfa.hpp"
 
 
 namespace {
@@ -80,6 +83,11 @@ struct Key {
   bool operator<(const Key& rhs) const { return words < rhs.words; }
 };
 
+struct CanonicalContext {
+  std::array<Key, 8> transformed{};
+  int count = 1;
+};
+
 std::uint64_t mix64(std::uint64_t value) {
   value += 0x9e3779b97f4a7c15ULL;
   value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -121,9 +129,18 @@ struct Options {
   std::optional<std::string> expected;
   bool estimate = false;
   int census_ply = -1;
+  bool dfa_stats = false;
   std::size_t census_max_states = 1'000'000;
   double census_seconds = 10.0;
   bool strong = false;
+  bool symbolic = false;
+  bool symbolic_verify = false;
+  int symbolic_ply = -1;
+  std::size_t dfa_max_nodes = 5'000'000;
+  std::string dfa_out;
+  std::string probe_dfa;
+  std::string dfa_checkpoint;
+  std::string resume_dfa;
   std::string db_out;
   std::string probe_db;
 };
@@ -136,6 +153,14 @@ class Twixt {
         height > kMaxDimension || cell_count_ > kMaxCells) {
       throw std::invalid_argument(
           "board dimensions must each be 3..26 and contain at most 64 cells");
+    }
+    for (int cell = 0; cell < cell_count_; ++cell) {
+      for (Player player : {Player::White, Player::Black}) {
+        const int p = static_cast<int>(player);
+        if (legal_cell(cell, player)) legal_mask_[p] |= 1ULL << cell;
+        if (on_start_border(cell, player)) start_mask_[p] |= 1ULL << cell;
+        if (on_target_border(cell, player)) target_mask_[p] |= 1ULL << cell;
+      }
     }
     for (auto& row : edge_for_) row.fill(-1);
     build_edges();
@@ -155,6 +180,9 @@ class Twixt {
     return (2 * cell_count_ + edge_count() + 1 + 63) / 64;
   }
   int edge_count() const { return static_cast<int>(edges_.size()); }
+  const Edge& edge(int edge_id) const { return edges_.at(edge_id); }
+  const std::vector<int>& incident_edges(int cell) const { return incident_.at(cell); }
+  bool edges_cross(int a, int b) const { return mask_has(crossings_.at(a), b); }
 
   bool valid_cell(int cell) const {
     const int x = cell % width_;
@@ -211,8 +239,12 @@ class Twixt {
   std::vector<int> legal_moves(const State& state) const {
     std::vector<int> result;
     result.reserve(cell_count_);
-    for (int cell = 0; cell < cell_count_; ++cell) {
-      if (legal_cell(cell, state.turn) && !occupied(state, cell)) result.push_back(cell);
+    std::uint64_t moves = legal_mask_[static_cast<int>(state.turn)] &
+                          ~(state.white | state.black);
+    while (moves != 0) {
+      const int cell = __builtin_ctzll(moves);
+      result.push_back(cell);
+      moves &= moves - 1;
     }
     return result;
   }
@@ -251,24 +283,24 @@ class Twixt {
 
   bool has_won(const State& state, Player player) const {
     const std::uint64_t own = pegs(state, player);
-    std::uint64_t visited = 0;
-    std::queue<int> queue;
-    for (int cell = 0; cell < cell_count_; ++cell) {
-      if (((own >> cell) & 1ULL) == 0 || !on_start_border(cell, player)) continue;
-      visited |= 1ULL << cell;
-      queue.push(cell);
+    std::uint64_t visited = own & start_mask_[static_cast<int>(player)];
+    std::array<std::uint8_t, kMaxCells> queue{};
+    int head = 0, tail = 0;
+    for (std::uint64_t starts = visited; starts != 0; starts &= starts - 1) {
+      queue[tail++] = static_cast<std::uint8_t>(__builtin_ctzll(starts));
     }
-    while (!queue.empty()) {
-      const int cell = queue.front();
-      queue.pop();
-      if (on_target_border(cell, player)) return true;
+    while (head != tail) {
+      const int cell = queue[head++];
+      if (((target_mask_[static_cast<int>(player)] >> cell) & 1ULL) != 0) {
+        return true;
+      }
       for (int edge_id : incident_[cell]) {
         if (!link_is_set(state, edge_id)) continue;
         const Edge& edge = edges_[edge_id];
         const int neighbor = edge.a == cell ? edge.b : edge.a;
         if (((own >> neighbor) & 1ULL) == 0 || ((visited >> neighbor) & 1ULL) != 0) continue;
         visited |= 1ULL << neighbor;
-        queue.push(neighbor);
+        queue[tail++] = static_cast<std::uint8_t>(neighbor);
       }
     }
     return false;
@@ -279,29 +311,24 @@ class Twixt {
   // path therefore proves that this player can never connect.
   bool can_ever_win(const State& state, Player player) const {
     const std::uint64_t opponent = pegs(state, other(player));
-    std::uint64_t usable = 0;
-    for (int cell = 0; cell < cell_count_; ++cell) {
-      if (legal_cell(cell, player) && ((opponent >> cell) & 1ULL) == 0) usable |= 1ULL << cell;
+    const int p = static_cast<int>(player);
+    const std::uint64_t usable = legal_mask_[p] & ~opponent;
+    std::uint64_t visited = usable & start_mask_[p];
+    std::array<std::uint8_t, kMaxCells> queue{};
+    int head = 0, tail = 0;
+    for (std::uint64_t starts = visited; starts != 0; starts &= starts - 1) {
+      queue[tail++] = static_cast<std::uint8_t>(__builtin_ctzll(starts));
     }
-
-    std::uint64_t visited = 0;
-    std::queue<int> queue;
-    for (int cell = 0; cell < cell_count_; ++cell) {
-      if (((usable >> cell) & 1ULL) == 0 || !on_start_border(cell, player)) continue;
-      visited |= 1ULL << cell;
-      queue.push(cell);
-    }
-    while (!queue.empty()) {
-      const int cell = queue.front();
-      queue.pop();
-      if (on_target_border(cell, player)) return true;
+    while (head != tail) {
+      const int cell = queue[head++];
+      if (((target_mask_[p] >> cell) & 1ULL) != 0) return true;
       for (int edge_id : incident_[cell]) {
         const Edge& edge = edges_[edge_id];
         const int neighbor = edge.a == cell ? edge.b : edge.a;
         if (((usable >> neighbor) & 1ULL) == 0 || ((visited >> neighbor) & 1ULL) != 0) continue;
         if (!link_is_set(state, edge_id) && crosses_existing(state, edge_id)) continue;
         visited |= 1ULL << neighbor;
-        queue.push(neighbor);
+        queue[tail++] = static_cast<std::uint8_t>(neighbor);
       }
     }
     return false;
@@ -313,6 +340,52 @@ class Twixt {
     for (int transform = 1; transform < symmetry_count(); ++transform) {
       Key candidate = packed_key(state, transform);
       if (candidate < best) best = candidate;
+    }
+    return best;
+  }
+
+  // Prepare all transformed versions of a parent once.  Each child differs
+  // only by one peg, its incident new links, and the side to move.
+  CanonicalContext prepare_canonical(const State& state,
+                                     bool use_symmetry) const {
+    CanonicalContext context;
+    context.count = use_symmetry ? symmetry_count() : 1;
+    for (int transform = 0; transform < context.count; ++transform) {
+      context.transformed[transform] = packed_key(state, transform);
+    }
+    return context;
+  }
+
+  Key canonical_child_key(const CanonicalContext& context,
+                          const State& parent, const State& child,
+                          int move) const {
+    Key best;
+    bool have_best = false;
+    for (int transform = 0; transform < context.count; ++transform) {
+      Key candidate = context.transformed[transform];
+      const bool swap_players = transform >= 4;
+      std::uint64_t value = parent.turn == Player::White ? 1ULL : 2ULL;
+      if (swap_players) value = value == 1 ? 2 : 1;
+      const int mapped_cell = cell_transform_[transform][move];
+      const int cell_bit = 2 * mapped_cell;
+      candidate.words[cell_bit / 64] |= value << (cell_bit % 64);
+
+      for (int word = 0; word < link_word_count(); ++word) {
+        std::uint64_t added = child.links[word] & ~parent.links[word];
+        while (added != 0) {
+          const int bit = __builtin_ctzll(added);
+          const int edge = 64 * word + bit;
+          const int mapped_edge = edge_transform_[transform][edge];
+          candidate.words[2 + mapped_edge / 64] |=
+              1ULL << (mapped_edge % 64);
+          added &= added - 1;
+        }
+      }
+      candidate.words.back() ^= 1ULL << 63;
+      if (!have_best || candidate < best) {
+        best = candidate;
+        have_best = true;
+      }
     }
     return best;
   }
@@ -439,6 +512,18 @@ class Twixt {
         throw std::logic_error("empty-board canonicalization failed");
       }
     }
+
+    State parent;
+    parent = play(parent, parse_cell("B1"));
+    parent = play(parent, parse_cell("A2"));
+    const CanonicalContext context = prepare_canonical(parent, true);
+    for (int move : legal_moves(parent)) {
+      const State child = play(parent, move);
+      if (!(canonical_child_key(context, parent, child, move) ==
+            canonical_key(child, true))) {
+        throw std::logic_error("incremental canonicalization failed");
+      }
+    }
   }
 
  private:
@@ -451,6 +536,9 @@ class Twixt {
   std::array<std::array<std::uint64_t, kLinkWords>, kMaxEdges> crossings_{};
   std::array<std::array<std::uint8_t, kMaxCells>, 8> cell_transform_{};
   std::array<std::array<std::uint8_t, kMaxEdges>, 8> edge_transform_{};
+  std::array<std::uint64_t, 2> legal_mask_{};
+  std::array<std::uint64_t, 2> start_mask_{};
+  std::array<std::uint64_t, 2> target_mask_{};
 
   static bool mask_has(const std::array<std::uint64_t, kLinkWords>& mask, int bit) {
     return ((mask[bit / 64] >> (bit % 64)) & 1ULL) != 0;
@@ -465,7 +553,7 @@ class Twixt {
   }
 
   bool crosses_existing(const State& state, int edge_id) const {
-    for (int word = 0; word < kLinkWords; ++word) {
+    for (int word = 0; word < link_word_count(); ++word) {
       if ((state.links[word] & crossings_[edge_id][word]) != 0) return true;
     }
     return false;
@@ -574,18 +662,25 @@ class Twixt {
   Key packed_key(const State& state, int transform) const {
     Key key;
     const bool swap_players = transform >= 4;
-    for (int cell = 0; cell < cell_count_; ++cell) {
-      std::uint64_t value = 0;
-      if ((state.white >> cell) & 1ULL) value = swap_players ? 2 : 1;
-      if ((state.black >> cell) & 1ULL) value = swap_players ? 1 : 2;
-      const int mapped = cell_transform_[transform][cell];
-      const int bit = 2 * mapped;
-      key.words[bit / 64] |= value << (bit % 64);
-    }
-    for (int edge_id = 0; edge_id < edge_count(); ++edge_id) {
-      if (!link_is_set(state, edge_id)) continue;
-      const int mapped = edge_transform_[transform][edge_id];
-      key.words[2 + mapped / 64] |= 1ULL << (mapped % 64);
+    auto add_pegs = [&](std::uint64_t pegs, std::uint64_t value) {
+      while (pegs != 0) {
+        const int cell = __builtin_ctzll(pegs);
+        const int mapped = cell_transform_[transform][cell];
+        const int bit = 2 * mapped;
+        key.words[bit / 64] |= value << (bit % 64);
+        pegs &= pegs - 1;
+      }
+    };
+    add_pegs(state.white, swap_players ? 2 : 1);
+    add_pegs(state.black, swap_players ? 1 : 2);
+    for (int word = 0; word < link_word_count(); ++word) {
+      std::uint64_t links = state.links[word];
+      while (links != 0) {
+        const int edge_id = 64 * word + __builtin_ctzll(links);
+        const int mapped = edge_transform_[transform][edge_id];
+        key.words[2 + mapped / 64] |= 1ULL << (mapped % 64);
+        links &= links - 1;
+      }
     }
     Player mapped_turn = state.turn;
     if (swap_players) mapped_turn = other(mapped_turn);
@@ -845,7 +940,10 @@ void print_estimate(const Twixt& game) {
             << "  board symmetries used: " << game.symmetry_count() << '\n'
             << "  alternating peg diagrams: " << scientific(peg_diagrams) << '\n'
             << "  peg diagrams / symmetry (optimistic): "
-            << scientific(peg_diagrams / game.symmetry_count()) << '\n'
+            // Diagonal/color swaps flip the turn and leave the white-first
+            // reachable parity class, so at most four reachable orientations
+            // merge even though square canonicalization considers eight images.
+            << scientific(peg_diagrams / 4) << '\n'
             << "  loose peg+arbitrary-link ceiling: " << scientific(loose_ceiling)
             << '\n'
             << "  empty-board potential path (White / Black): "
@@ -869,6 +967,193 @@ struct PegKeyHash {
   }
 };
 
+struct DfaVariable {
+  bool link = false;
+  int index = 0;
+};
+
+// Four words hold 128 two-bit symbols, enough for the 5x6 and 6x6 pilot.
+struct DfaWord {
+  std::array<std::uint64_t, 4> words{};
+  bool operator<(const DfaWord& rhs) const { return words < rhs.words; }
+  bool operator==(const DfaWord& rhs) const { return words == rhs.words; }
+
+  void set(int position, std::uint8_t symbol) {
+    const int shift = 62 - 2 * (position % 32);
+    words[position / 32] |= static_cast<std::uint64_t>(symbol) << shift;
+  }
+  std::uint8_t get(int position) const {
+    const int shift = 62 - 2 * (position % 32);
+    return static_cast<std::uint8_t>((words[position / 32] >> shift) & 3ULL);
+  }
+};
+
+struct DfaNodeSignature {
+  std::array<std::int32_t, 3> next{{-1, -1, -1}};
+  bool final = false;
+  bool operator==(const DfaNodeSignature& rhs) const {
+    return next == rhs.next && final == rhs.final;
+  }
+};
+
+struct DfaNodeHash {
+  std::size_t operator()(const DfaNodeSignature& node) const noexcept {
+    std::uint64_t hash = node.final ? 0x9e3779b97f4a7c15ULL
+                                    : 0x243f6a8885a308d3ULL;
+    for (std::int32_t child : node.next) {
+      hash ^= mix64(static_cast<std::uint32_t>(child) + hash);
+    }
+    return static_cast<std::size_t>(hash);
+  }
+};
+
+struct DfaStats {
+  std::uint64_t states = 0;
+  std::uint64_t arcs = 0;
+};
+
+std::vector<DfaVariable> dfa_variables(const Twixt& game, bool frontier,
+                                       bool pilot_limit = true) {
+  std::vector<DfaVariable> variables;
+  if (!frontier) {
+    for (int cell = 0; cell < game.cell_count(); ++cell) {
+      if (game.valid_cell(cell)) variables.push_back({false, cell});
+    }
+    for (int edge = 0; edge < game.edge_count(); ++edge) {
+      variables.push_back({true, edge});
+    }
+  } else {
+    for (int cell = 0; cell < game.cell_count(); ++cell) {
+      if (!game.valid_cell(cell)) continue;
+      variables.push_back({false, cell});
+      for (int edge = 0; edge < game.edge_count(); ++edge) {
+        const Edge& endpoints = game.edge(edge);
+        if (std::max<int>(endpoints.a, endpoints.b) == cell) {
+          variables.push_back({true, edge});
+        }
+      }
+    }
+  }
+  // Square-board diagonal symmetries can swap the canonical side to move.
+  variables.push_back({false, -1});
+  if (pilot_limit && variables.size() > 128) {
+    throw std::invalid_argument(
+        "--dfa-stats currently supports position strings of at most 128 symbols");
+  }
+  return variables;
+}
+
+DfaWord make_dfa_word(const Twixt& game, const Key& key,
+                      const std::vector<DfaVariable>& variables) {
+  const State state = game.unpack_key(key);
+  DfaWord word;
+  for (std::size_t position = 0; position < variables.size(); ++position) {
+    const DfaVariable variable = variables[position];
+    std::uint8_t symbol = 0;
+    if (variable.index < 0) {
+      symbol = state.turn == Player::Black ? 1 : 0;
+    } else if (variable.link) {
+      symbol = static_cast<std::uint8_t>(
+          (state.links[variable.index / 64] >> (variable.index % 64)) & 1ULL);
+    } else {
+      symbol = static_cast<std::uint8_t>(
+          ((state.white >> variable.index) & 1ULL) != 0
+              ? 1
+              : ((state.black >> variable.index) & 1ULL) != 0 ? 2 : 0);
+    }
+    word.set(static_cast<int>(position), symbol);
+  }
+  return word;
+}
+
+DfaStats minimal_acyclic_dfa(std::vector<DfaWord>& words, int length) {
+  std::sort(words.begin(), words.end());
+  words.erase(std::unique(words.begin(), words.end()), words.end());
+
+  std::vector<DfaNodeSignature> nodes(1);
+  std::vector<int> free_nodes;
+  std::vector<int> path(length + 1, -1);
+  path[0] = 0;
+  std::unordered_map<DfaNodeSignature, int, DfaNodeHash> registry;
+  registry.reserve(std::max<std::size_t>(1024, words.size() / 4));
+  DfaStats stats;
+
+  auto allocate = [&]() {
+    if (!free_nodes.empty()) {
+      const int id = free_nodes.back();
+      free_nodes.pop_back();
+      nodes[id] = DfaNodeSignature{};
+      return id;
+    }
+    nodes.emplace_back();
+    return static_cast<int>(nodes.size() - 1);
+  };
+  auto register_node = [&](int id) {
+    const auto [found, inserted] = registry.emplace(nodes[id], id);
+    if (!inserted) {
+      free_nodes.push_back(id);
+      return found->second;
+    }
+    ++stats.states;
+    for (int child : nodes[id].next) {
+      if (child >= 0) ++stats.arcs;
+    }
+    return id;
+  };
+
+  DfaWord previous;
+  bool have_previous = false;
+  for (const DfaWord& word : words) {
+    int common = 0;
+    if (have_previous) {
+      while (common < length && word.get(common) == previous.get(common)) {
+        ++common;
+      }
+      for (int depth = length; depth > common; --depth) {
+        const int child = register_node(path[depth]);
+        nodes[path[depth - 1]].next[previous.get(depth - 1)] = child;
+      }
+    }
+    for (int depth = common; depth < length; ++depth) {
+      const int child = allocate();
+      nodes[path[depth]].next[word.get(depth)] = child;
+      path[depth + 1] = child;
+    }
+    nodes[path[length]].final = true;
+    previous = word;
+    have_previous = true;
+  }
+  if (have_previous) {
+    for (int depth = length; depth > 0; --depth) {
+      const int child = register_node(path[depth]);
+      nodes[path[depth - 1]].next[previous.get(depth - 1)] = child;
+    }
+    (void)register_node(path[0]);
+  }
+  return stats;
+}
+
+void print_dfa_stats(const Twixt& game, const std::vector<Key>& layer, int ply,
+                     bool frontier) {
+  using Clock = std::chrono::steady_clock;
+  const auto started = Clock::now();
+  const std::vector<DfaVariable> variables = dfa_variables(game, frontier);
+  std::vector<DfaWord> words;
+  words.reserve(layer.size());
+  for (const Key& key : layer) words.push_back(make_dfa_word(game, key, variables));
+  const DfaStats stats =
+      minimal_acyclic_dfa(words, static_cast<int>(variables.size()));
+  const double seconds =
+      std::chrono::duration<double>(Clock::now() - started).count();
+  const double positions_per_state =
+      stats.states == 0 ? 0.0 : static_cast<double>(layer.size()) / stats.states;
+  std::cout << "dfa," << (frontier ? "frontier" : "linear") << ',' << ply
+            << ',' << layer.size() << ',' << variables.size() << ','
+            << stats.states << ',' << stats.arcs << ',' << std::fixed
+            << std::setprecision(3) << positions_per_state << ',' << seconds
+            << '\n';
+}
+
 bool run_census(const Twixt& game, const State& root, const Options& options) {
   using Clock = std::chrono::steady_clock;
   const auto started = Clock::now();
@@ -877,6 +1162,11 @@ bool run_census(const Twixt& game, const State& root, const Options& options) {
   std::cout << "Reachable-state census (bounded, full peg+link states)\n"
             << "ply,states,peg_diagrams,link_multiplicity,raw_children,terminal_wins,"
                "terminal_draws,no_moves\n";
+  if (options.dfa_stats) {
+    std::cout << "DFA statistics\n"
+              << "kind,order,ply,positions,symbols,dfa_states,dfa_arcs,"
+                 "positions_per_dfa_state,seconds\n";
+  }
 
   for (int ply = 0; ply <= options.census_ply; ++ply) {
     std::unordered_set<PegKey, PegKeyHash> peg_keys;
@@ -920,9 +1210,11 @@ bool run_census(const Twixt& game, const State& root, const Options& options) {
       }
       if (ply == options.census_ply) continue;
 
+      const CanonicalContext canonical =
+          game.prepare_canonical(state, options.symmetry);
       for (int move : moves) {
         const State child = game.play(state, move);
-        next.insert(game.canonical_key(child, options.symmetry));
+        next.insert(game.canonical_child_key(canonical, state, child, move));
         ++raw_children;
         if (options.census_max_states > 0 &&
             next.size() > options.census_max_states) {
@@ -944,10 +1236,22 @@ bool run_census(const Twixt& game, const State& root, const Options& options) {
     const double multiplicity =
         peg_keys.empty() ? 0.0
                          : static_cast<double>(layer.size()) / peg_keys.size();
-    std::cout << ply << ',' << layer.size() << ',' << peg_keys.size() << ','
-              << std::fixed << std::setprecision(4) << multiplicity << ','
-              << raw_children << ',' << terminal_wins << ',' << terminal_draws
-              << ',' << no_moves << '\n';
+    if (capped) {
+      // The layer is complete, but only a prefix was inspected.  Dividing the
+      // full layer by this partial peg count produces a spurious multiplicity.
+      std::cout << ply << ',' << layer.size() << ",NA,NA," << raw_children
+                << ",NA,NA,NA\n";
+    } else {
+      std::cout << ply << ',' << layer.size() << ',' << peg_keys.size() << ','
+                << std::fixed << std::setprecision(4) << multiplicity << ','
+                << raw_children << ',' << terminal_wins << ',' << terminal_draws
+                << ',' << no_moves << '\n';
+    }
+
+    if (options.dfa_stats) {
+      print_dfa_stats(game, layer, ply, false);
+      print_dfa_stats(game, layer, ply, true);
+    }
 
     if (capped) {
       std::cout << "Census stopped before completing ply " << ply + 1 << " ("
@@ -1018,8 +1322,11 @@ std::optional<StrongSolution> build_strong_solution(const Twixt& game,
       if (terminal_outcome(game, state, options.draw_pruning).has_value()) {
         continue;
       }
+      const CanonicalContext canonical =
+          game.prepare_canonical(state, options.symmetry);
       for (int move : game.legal_moves(state)) {
-        next.insert(game.canonical_key(game.play(state, move), options.symmetry));
+        const State child = game.play(state, move);
+        next.insert(game.canonical_child_key(canonical, state, child, move));
         ++generated;
         if (options.census_max_states > 0 &&
             next.size() > options.census_max_states) {
@@ -1062,9 +1369,12 @@ std::optional<StrongSolution> build_strong_solution(const Twixt& game,
         const std::vector<std::int8_t>& child_values =
             solution.values[reverse + 1];
         Outcome best = Outcome::Loss;
+        const CanonicalContext canonical =
+            game.prepare_canonical(state, options.symmetry);
         for (int move : game.legal_moves(state)) {
-          const Key child = game.canonical_key(game.play(state, move),
-                                               options.symmetry);
+          const State child_state = game.play(state, move);
+          const Key child = game.canonical_child_key(
+              canonical, state, child_state, move);
           const auto found = std::lower_bound(children.begin(), children.end(), child);
           if (found == children.end() || !(*found == child)) {
             throw std::logic_error("strong child missing from next layer");
@@ -1357,6 +1667,8 @@ void run_database_probe(const Twixt& game, const State& state,
   std::cout << '\n';
 }
 
+#include "twixt_symbolic.hpp"
+
 void print_help(const char* program) {
   std::cout
       << "Usage: " << program << " [options]\n\n"
@@ -1374,8 +1686,17 @@ void print_help(const char* program) {
       << "  --no-draw-pruning     disable potential-connection draw proofs\n"
       << "  --estimate            print a combinatorial board estimate and exit\n"
       << "  --census-ply N        enumerate exact reachable states through ply N\n"
+      << "  --dfa-stats           minimize census layers as DFA languages\n"
+      << "  --symbolic            solve with DFA move generation and retrograde\n"
+      << "  --symbolic-ply N      generate DFA reachable layers only, through ply N\n"
+      << "  --symbolic-verify     compare a symbolic solve/probe to explicit analysis\n"
+      << "  --dfa-max-nodes N     cap shared DFA pool including intermediates (default: 5M)\n"
+      << "  --dfa-out PATH        save a completed symbolic WDL solution\n"
+      << "  --probe-dfa PATH      query a symbolic solution at --moves\n"
+      << "  --dfa-checkpoint PATH atomically checkpoint each symbolic layer\n"
+      << "  --resume-dfa PATH     resume a checkpoint (uses a fresh time budget)\n"
       << "  --census-max-states N stop before a layer exceeds N states (default: 1M)\n"
-      << "  --census-seconds S    census wall-time cap; 0 disables (default: 10)\n"
+      << "  --census-seconds S    census/strong/symbolic time cap; 0 disables (default: 10)\n"
       << "  --strong              enumerate and retrograde-solve every reachable state\n"
       << "  --db-out PATH         write a completed --strong database\n"
       << "  --probe-db PATH       query a WDL database at --moves (empty = root)\n"
@@ -1430,6 +1751,26 @@ Options parse_options(int argc, char** argv) {
     } else if (arg == "--census-ply") {
       options.census_ply =
           static_cast<int>(parse_size_t(value("--census-ply"), "--census-ply"));
+    } else if (arg == "--dfa-stats") {
+      options.dfa_stats = true;
+    } else if (arg == "--symbolic") {
+      options.symbolic = true;
+    } else if (arg == "--symbolic-ply") {
+      options.symbolic = true;
+      options.symbolic_ply = static_cast<int>(parse_size_t(value("--symbolic-ply"), "--symbolic-ply"));
+    } else if (arg == "--symbolic-verify") {
+      options.symbolic_verify = true;
+    } else if (arg == "--dfa-max-nodes") {
+      options.dfa_max_nodes = parse_size_t(value("--dfa-max-nodes"), "--dfa-max-nodes");
+    } else if (arg == "--dfa-out") {
+      options.dfa_out = value("--dfa-out");
+    } else if (arg == "--probe-dfa") {
+      options.probe_dfa = value("--probe-dfa");
+    } else if (arg == "--dfa-checkpoint") {
+      options.dfa_checkpoint = value("--dfa-checkpoint");
+    } else if (arg == "--resume-dfa") {
+      options.symbolic = true;
+      options.resume_dfa = value("--resume-dfa");
     } else if (arg == "--census-max-states") {
       options.census_max_states =
           parse_size_t(value("--census-max-states"), "--census-max-states");
@@ -1470,13 +1811,49 @@ int run(int argc, char** argv) {
   const int analysis_modes = static_cast<int>(options.estimate) +
                              static_cast<int>(options.census_ply >= 0) +
                              static_cast<int>(options.strong) +
+                             static_cast<int>(options.symbolic) +
+                             static_cast<int>(!options.probe_dfa.empty()) +
                              static_cast<int>(!options.probe_db.empty());
   if (analysis_modes > 1) {
     throw std::invalid_argument(
-        "--estimate, --census-ply, --strong, and --probe-db are mutually exclusive");
+        "estimate, census, explicit, symbolic, and probe modes are mutually exclusive");
   }
   if (!options.db_out.empty() && !options.strong) {
     throw std::invalid_argument("--db-out requires --strong");
+  }
+  if (options.dfa_stats && options.census_ply < 0) {
+    throw std::invalid_argument("--dfa-stats requires --census-ply");
+  }
+  if (options.symbolic_verify && !options.symbolic && options.probe_dfa.empty()) {
+    throw std::invalid_argument("--symbolic-verify requires a symbolic solve or --probe-dfa");
+  }
+  if (!options.dfa_out.empty() && (!options.symbolic || options.symbolic_ply >= 0)) {
+    throw std::invalid_argument("--dfa-out requires a full --symbolic solve");
+  }
+  if (!options.dfa_checkpoint.empty() && !options.symbolic) {
+    throw std::invalid_argument("--dfa-checkpoint requires symbolic solving or generation");
+  }
+  if (!options.resume_dfa.empty() && !options.moves.empty()) {
+    throw std::invalid_argument("--resume-dfa uses the saved root; --moves cannot change it");
+  }
+  if (!options.dfa_out.empty() && options.dfa_out == options.dfa_checkpoint) {
+    throw std::invalid_argument("solution and checkpoint paths must differ");
+  }
+  if (options.symbolic_ply >= 0 && options.expected.has_value()) {
+    throw std::invalid_argument("--expect requires a complete solve, not --symbolic-ply");
+  }
+  if (options.symbolic || options.symbolic_verify) std::cout << std::unitbuf;
+  std::unique_ptr<SymbolicDatabase> resumed;
+  if (!options.resume_dfa.empty()) {
+    resumed = std::make_unique<SymbolicDatabase>(options.resume_dfa, &options);
+    options.width = resumed->width();
+    options.height = resumed->height();
+  }
+  std::unique_ptr<SymbolicDatabase> symbolic_database;
+  if (!options.probe_dfa.empty()) {
+    symbolic_database = std::make_unique<SymbolicDatabase>(options.probe_dfa);
+    options.width = symbolic_database->width();
+    options.height = symbolic_database->height();
   }
   std::unique_ptr<WdlDatabase> database;
   if (!options.probe_db.empty()) {
@@ -1503,6 +1880,31 @@ int run(int argc, char** argv) {
     if (!(rectangle.expand_compact_key(rectangle.compact_key(packed)) == packed)) {
       throw std::logic_error("compact key round-trip failed");
     }
+    Twixt square7(7, 7);
+    State square_state;
+    for (int ply = 0; ply < 8; ++ply) {
+      const std::vector<int> moves = square7.legal_moves(square_state);
+      const CanonicalContext context =
+          square7.prepare_canonical(square_state, true);
+      for (int move : moves) {
+        const State child = square7.play(square_state, move);
+        if (!(square7.canonical_child_key(context, square_state, child, move) ==
+              square7.canonical_key(child, true))) {
+          throw std::logic_error("7x7 incremental canonicalization failed");
+        }
+      }
+      square_state = square7.play(square_state, moves[(3 * ply + 1) % moves.size()]);
+    }
+    std::vector<DfaWord> dfa_test(4);
+    dfa_test[1].set(1, 1);
+    dfa_test[2].set(0, 1);
+    dfa_test[3].set(0, 1);
+    dfa_test[3].set(1, 1);
+    const DfaStats dfa_stats = minimal_acyclic_dfa(dfa_test, 2);
+    if (dfa_stats.states != 3 || dfa_stats.arcs != 4) {
+      throw std::logic_error("minimal acyclic DFA test failed");
+    }
+    symbolic_move_self_test();
     std::cout << "self-test: ok\n";
     return 0;
   }
@@ -1526,6 +1928,20 @@ int run(int argc, char** argv) {
   if (database) {
     run_database_probe(game, root, *database, options.quiet);
     return 0;
+  }
+
+  if (symbolic_database) {
+    if (options.symbolic_verify) {
+      verify_symbolic(symbolic_database->solution(), game,
+                      symbolic_database->solution().root_state(), options, true);
+    }
+    probe_symbolic(game, root, symbolic_database->solution(), options.quiet);
+    return 0;
+  }
+
+  if (options.symbolic) {
+    return run_symbolic(game, resumed ? resumed->solution().root_state() : root,
+                         options, resumed.get()) ? 0 : 3;
   }
 
 
@@ -1598,6 +2014,9 @@ int run(int argc, char** argv) {
 int main(int argc, char** argv) {
   try {
     return run(argc, argv);
+  } catch (const twixt_dfa::Limit& limit) {
+    std::cerr << "DFA resource cap: " << limit.what() << '\n';
+    return 3;
   } catch (const std::exception& error) {
     std::cerr << "error: " << error.what() << '\n';
     return 1;

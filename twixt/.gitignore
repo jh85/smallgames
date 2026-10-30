@@ -1,4 +1,8 @@
 /twixt
+/symbolic_dfa_test
+/*.twixtdfa
+/*.twixtckp
+/*.partial
 /tables/
 /*.twixtdb
 /*.log
