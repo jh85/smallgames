@@ -133,7 +133,7 @@ inline std::vector<Id> read_delta(Manager& manager, const std::string& path,
 
 struct ProcessOptions {
   unsigned workers = 1;
-  std::uint64_t memory_bytes = 0;  // aggregate PSS on Linux; 0 disables
+  std::uint64_t memory_bytes = 0;  // Linux RSS for threads, aggregate PSS for processes; 0 disables
   std::string temporary_directory = "tables";
   bool threads = true;
 };
@@ -182,6 +182,24 @@ inline std::uint64_t process_memory(pid_t pid) {
       std::uint64_t kib = 0;
       if (value >> kib) return kib * 1024;
     }
+  }
+#else
+  (void)pid;
+#endif
+  return 0;
+}
+
+// Reading smaps_rollup walks page tables and can obstruct workers changing
+// memory mappings. Threads share one address space, so its RSS already counts
+// their resident pages once. statm reads counters without that expensive walk.
+inline std::uint64_t resident_memory(pid_t pid) {
+#ifdef __linux__
+  std::ifstream in("/proc/" + std::to_string(pid) + "/statm");
+  std::uint64_t virtual_pages = 0, resident_pages = 0;
+  static const long page_size = ::sysconf(_SC_PAGESIZE);
+  if ((in >> virtual_pages >> resident_pages) && page_size > 0 &&
+      resident_pages <= std::numeric_limits<std::uint64_t>::max() / page_size) {
+    return resident_pages * static_cast<std::uint64_t>(page_size);
   }
 #else
   (void)pid;
@@ -260,7 +278,9 @@ ProcessStats process_jobs(Manager& manager, const ProcessOptions& options,
         for (pid_t pid : workers.pids) if (pid > 0) bytes += process_memory(pid);
         stats.peak_memory_bytes = std::max(stats.peak_memory_bytes, bytes);
         if (bytes > options.memory_bytes) throw Limit("aggregate parallel worker memory cap reached");
-        memory_checked = now;
+        // Start the interval after the scan; a slow scan must not cause
+        // another one immediately on the next coordinator iteration.
+        memory_checked = Clock::now();
       }
       for (std::size_t i = 0; i < count; ++i) {
         if (workers.pids[i] <= 0) continue;
@@ -366,10 +386,10 @@ ProcessStats thread_jobs(Manager& manager, const ProcessOptions& options,
 #ifdef TWIXT_PROCESS_WORKERS
           const auto now = Clock::now();
           if (options.memory_bytes != 0 && now - memory_checked >= std::chrono::seconds(1)) {
-            const std::uint64_t bytes = process_memory(::getpid());
+            const std::uint64_t bytes = resident_memory(::getpid());
             stats.peak_memory_bytes = std::max(stats.peak_memory_bytes, bytes);
             if (bytes > options.memory_bytes) throw Limit("aggregate parallel worker memory cap reached");
-            memory_checked = now;
+            memory_checked = Clock::now();
           }
 #endif
         } catch (...) {

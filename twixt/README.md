@@ -239,12 +239,21 @@ scale linearly with the worker count. On this machine 64 logical CPUs share
 
 `--parallel-min-nodes N` avoids worker overhead below N active DFA nodes
 (default: 20,000; use 0 to exercise parallelism on tiny tests).
-`--parallel-memory-gb N` sets the Linux PSS monitor's process/worker memory
-budget (default: 512 GiB; 0 disables). It is sampled during worker computation,
-not a kernel-enforced bound; collection/checkpoint peaks can require additional
+`--parallel-memory-gb N` sets the Linux memory monitor's budget (default: 512
+GiB; 0 disables). Threads use process RSS from `/proc/PID/statm`, which counts
+their shared address space once. Fork workers use aggregate PSS to account for
+copy-on-write sharing. The monitor is sampled during worker computation, not
+a kernel-enforced bound; collection/checkpoint peaks can require additional
 space. The local production wrapper also imposes a 512 GiB virtual-memory
 limit. Worker errors and resource caps cancel/join the remaining workers and
 leave the last completed checkpoint intact.
+
+The original thread monitor scanned `smaps_rollup` once per second. In the
+large 5x6 retrograde run this consumed nearly an entire CPU in kernel work
+while workers waited on memory-mapping operations. The RSS counter avoids
+that page-table scan. Logs now label thread memory as RSS, rather than PSS.
+Serial phases and uneven job completion can still leave fewer than 64 workers
+busy; `--workers` specifies the concurrency limit, not sustained utilization.
 
 `--parallel-backend processes` selects the alternative POSIX fork backend.
 It shares immutable snapshots by copy-on-write and returns validated node
@@ -275,7 +284,8 @@ seconds including comparison and checkpoints, peaking at 18,562,096 KiB RSS.
 This is a new clean parallel run, not a comparison against the earlier staged
 development timings.
 
-One release binary generated 6x6 reachable layers 0--8 at each worker count:
+One release binary (commit `d47bdc6`, before the memory-monitor fix) generated
+6x6 reachable layers 0--8 at each worker count:
 
 | Workers | Generation seconds | Speedup | Peak RSS, GiB |
 |---:|---:|---:|---:|

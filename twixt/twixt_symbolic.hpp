@@ -396,7 +396,8 @@ class SymbolicTwixt {
     std::cout << "Parallel " << phase << " ply " << ply << ": wall=" << stats.seconds
               << " s, import=" << stats.import_seconds << " s, merge/GC=" << stats.merge_seconds
               << " s, worker_slots=" << stats.peak_workers
-              << ", peak_active_workers=" << stats.peak_active_workers << ", peak_PSS_GiB="
+              << ", peak_active_workers=" << stats.peak_active_workers
+              << (options_.parallel_processes ? ", peak_PSS_GiB=" : ", peak_RSS_GiB=")
               << stats.peak_memory_bytes / static_cast<double>(1ULL << 30)
               << ", delta_MiB=" << stats.delta_bytes / static_cast<double>(1ULL << 20) << '\n';
   }

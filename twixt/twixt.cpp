@@ -1701,7 +1701,7 @@ void print_help(const char* program) {
       << "  --workers N           parallel symbolic workers, 1..64 (default: 1)\n"
       << "  --parallel-backend B  threads (default) or processes\n"
       << "  --parallel-min-nodes N use workers when active DFA has at least N nodes (default: 20000)\n"
-      << "  --parallel-memory-gb N aggregate worker PSS cap in GiB; 0 disables (default: 512)\n"
+      << "  --parallel-memory-gb N RSS (threads) / aggregate PSS (processes) cap in GiB; 0 disables (default: 512)\n"
       << "  --parallel-temp-dir PATH temporary worker deltas (default: tables)\n"
       << "  --dfa-out PATH        save a completed symbolic WDL solution\n"
       << "  --probe-dfa PATH      query a symbolic solution at --moves\n"
