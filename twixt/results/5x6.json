@@ -1,0 +1,51 @@
+{
+  "board": {
+    "width": 5,
+    "height": 6
+  },
+  "rules": {
+    "first_player": "White",
+    "White_goal": "top-bottom",
+    "Black_goal": "left-right",
+    "automatic_links": true,
+    "crossing_links": false,
+    "pie_rule": false,
+    "link_removal": false
+  },
+  "root_absolute_result": "Black win",
+  "root_side_to_move_result": "loss",
+  "reachable_positions": 11101540840,
+  "layers": 27,
+  "wdl_perspective": "side to move",
+  "wdl_totals": {
+    "win": 2809746095,
+    "draw": 4516000888,
+    "loss": 3775793857
+  },
+  "archive": {
+    "path": "tables/5x6.twixtdfa",
+    "magic": "TWXDFA01",
+    "version": 2,
+    "shared_nodes_including_terminals": 172546666,
+    "bytes": 1137466072,
+    "sha256": "7ba2402fd0e8a2e5f4e087f9c7ee1178dd6f0c49b166f44e9cc899c2efee122d"
+  },
+  "validation": {
+    "archive_reloaded_and_root_probed": true,
+    "all_27_wdl_count_sums_equal_forward_counts": true,
+    "sha256_recomputed": true,
+    "independent_exhaustive_verification": false
+  },
+  "execution": {
+    "staged_run": true,
+    "final_source_commit": "21721f40dfa4794f9ec3e376e573ee3b7a424892",
+    "final_resume_starting_retrograde_ply": 16,
+    "workers": 32,
+    "final_resume_wall_time": "1:41:06",
+    "final_resume_peak_rss_kib": 211250064,
+    "final_resume_recorded_peak_virtual_memory_kib": 265154848,
+    "solver_exit_status": 0,
+    "archive_probe_completed_utc": "2026-10-31T05:42:08Z",
+    "timing_scope": "Final resumed run only; excludes preceding forward generation, retrograde plies 17-26, earlier attempts, and the post-run archive probe."
+  }
+}

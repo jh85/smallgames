@@ -69,13 +69,33 @@ Completed local DFA artifacts (generated files remain ignored by git):
 |---:|:---:|---:|---:|:---|
 | 4x5 | Black win | 304,210 | 1,112,064 | `5574ea10ee328c26fed988f9925aae8d6657ba746e7e4baa77afe0051a44cc2d` |
 | 5x5 | Draw | 60,535,612 | 55,171,387 | `54643f75bb27afce1bbd68bcf85dc83f43f3667dac7b9e4ef6fba2a1262d149e` |
+| 5x6 | Black win | 11,101,540,840 | 1,137,466,072 | `7ba2402fd0e8a2e5f4e087f9c7ee1178dd6f0c49b166f44e9cc899c2efee122d` |
 
-Files are `tables/4x5.twixtdfa` and `tables/5x5.twixtdfa`. No external archive or
-DOI has been published. Reload/probe examples:
+**5x6 has completed all 27 W/L/D layers under the auto-link rules above.** This
+means 5 columns and 6 rows: White moves first and tries to connect top to bottom;
+Black connects left to right. Every one of White's 18 opening moves loses under
+optimal play. The solution has 172,546,666 shared DFA nodes and occupies 1.06 GiB.
+The completed file was successfully reloaded/probed, its SHA-256 was recomputed,
+and each layer's W+D+L count matches its earlier forward reachable count.
+Unlike 5x5, 5x6 has **not** been independently exhaustively cross-checked against
+explicit retrograde. Counts and execution/verification metadata are preserved
+in [results/5x6-wdl.csv](results/5x6-wdl.csv) and
+[results/5x6.json](results/5x6.json).
+
+The final resumed run used 32 workers, completed in 1:41:06, and peaked at
+201.46 GiB RSS (252.87 GiB recorded peak virtual memory). That timing starts at
+retrograde ply 16 and includes checkpoint loading and output. Earlier forward
+generation, solved layers 17--26, and interrupted attempts are excluded; this
+is not a runtime for a clean solve from the empty board.
+
+Files are `tables/4x5.twixtdfa`, `tables/5x5.twixtdfa`, and
+`tables/5x6.twixtdfa`. No external archive or DOI has been published.
+Reload/probe examples:
 
 ```sh
 ./twixt --probe-dfa tables/5x5.twixtdfa --quiet
 ./twixt --probe-dfa tables/5x5.twixtdfa --moves C3 --quiet
+./twixt --probe-dfa tables/5x6.twixtdfa --quiet
 ```
 
 Every opening move on 5x5 draws under optimal play. After White's C3, Black's
@@ -196,9 +216,9 @@ Resuming the 5x6 checkpoint reached ply 11 with 149,777,156 positions in
 167 seconds, including checkpoint overhead.
 
 The first capped 5x6 run completed reachable layers 0--11 (262,665,577 positions
-across layers), then stopped during layer 12 without a WDL solution. The working
-checkpoint has since advanced. Checkpoints can continue with a larger pool and
-time allowance, without regenerating their completed layers:
+across layers), then stopped during layer 12 without a WDL solution. Subsequent
+resumes completed the solve recorded above. For an unfinished checkpoint,
+increase its pool/time allowance without regenerating completed layers:
 
 ```sh
 ./twixt --resume-dfa tables/5x6-working.twixtckp \
