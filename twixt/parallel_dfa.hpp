@@ -369,6 +369,7 @@ ProcessStats thread_jobs(Manager& manager, const ProcessOptions& options,
             if (!worker_error) worker_error = std::current_exception();
             manager.request_worker_stop();
           }
+          manager.release_worker_filter_buffers();
           remaining.fetch_sub(1, std::memory_order_release);
         });
       }

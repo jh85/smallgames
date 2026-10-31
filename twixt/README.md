@@ -244,9 +244,10 @@ GiB; 0 disables). Threads use process RSS from `/proc/PID/statm`, which counts
 their shared address space once. Fork workers use aggregate PSS to account for
 copy-on-write sharing. The monitor is sampled during worker computation, not
 a kernel-enforced bound; collection/checkpoint peaks can require additional
-space. The local production wrapper also imposes a 512 GiB virtual-memory
-limit. Worker errors and resource caps cancel/join the remaining workers and
-leave the last completed checkpoint intact.
+space. The local production wrapper also imposes a virtual-memory limit, with
+headroom above its RSS budget because reserved capacity consumes address space
+before it becomes resident RAM. Worker errors and resource caps cancel/join the
+remaining workers and leave the last completed checkpoint intact.
 
 The original thread monitor scanned `smaps_rollup` once per second. In the
 large 5x6 retrograde run this consumed nearly an entire CPU in kernel work
@@ -254,6 +255,29 @@ while workers waited on memory-mapping operations. The RSS counter avoids
 that page-table scan. Logs now label thread memory as RSS, rather than PSS.
 Serial phases and uneven job completion can still leave fewer than 64 workers
 busy; `--workers` specifies the concurrency limit, not sustained utilization.
+
+Each worker's dense filter scratch uses two 32-bit arrays indexed by node ID.
+At an index of 500 million, their sizes alone total about 238 GiB for 64 workers,
+before vector spare capacity or any graph/hash storage. Finished workers now
+release those arrays before the remaining jobs, union, and copying collection
+complete. Per-operation product memoization can still exceed its between-call
+cache-clear threshold during one large operation; this is not a strict memory
+budget. Collection also temporarily holds both old and new DAGs. High RSS is
+therefore insufficient to diagnose a leak, and virtual memory can reach an
+address-space limit before RSS reaches the same number.
+
+A sequential 64-worker 5x5 comparison measured the early-release change:
+
+| Version | Peak RSS, GiB | Elapsed seconds |
+|:---|---:|---:|
+| Before (`3548086`) | 17.59 | 313.38 |
+| Release finished workers' filter buffers | 15.84 | 330.25 |
+
+Both runs exactly matched every W/L/D language in the independently verified
+5x5 solution. Peak RSS decreased by 9.9%; recorded elapsed time increased by
+5.4%. Both measurements ran alongside the production 5x6 job, whose load varied.
+This improves temporary-memory retention; it does not establish the cause of
+the earlier 5x6 allocation failure or rule out a production-only leak.
 
 `--parallel-backend processes` selects the alternative POSIX fork backend.
 It shares immutable snapshots by copy-on-write and returns validated node

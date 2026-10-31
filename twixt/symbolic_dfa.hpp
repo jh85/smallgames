@@ -195,6 +195,24 @@ class Manager {
   void finish_workers() { concurrent_ = false; worker_stop_->store(false, std::memory_order_relaxed); }
   void request_worker_stop() { worker_stop_->store(true, std::memory_order_relaxed); }
   bool worker_stopping() const { return worker_stop_->load(std::memory_order_relaxed); }
+  // Call inside the owning worker after its last operation. Results contain
+  // node IDs, so no returned language depends on these scratch arrays. Release
+  // them before slow jobs, union operations, or copying GC raise the next peak.
+  void release_worker_filter_buffers() noexcept {
+    auto& ctx = context();
+    std::vector<Id>().swap(ctx.filter_values);
+    std::vector<std::uint32_t>().swap(ctx.filter_tags);
+    ctx.filter_epoch = 0;
+  }
+  // Inspect only while workers are quiescent (for diagnostics and tests).
+  std::size_t filter_cache_bytes() const {
+    std::size_t bytes = 0;
+    for (const auto& ctx : contexts_) {
+      bytes += ctx->filter_values.capacity() * sizeof(Id) +
+               ctx->filter_tags.capacity() * sizeof(std::uint32_t);
+    }
+    return bytes;
+  }
   class WorkerScope {
    public:
     WorkerScope(Manager& manager, unsigned slot) : old_owner_(worker_manager), old_slot_(worker_slot) {

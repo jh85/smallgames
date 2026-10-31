@@ -24,7 +24,11 @@ int main() {
     std::vector<Id> kept;
     const auto stats = parallel_jobs(manager, options, 72, 2,
         [&](std::size_t job) {
-          const Id singleton = manager.singleton(word_for(job));
+          const Word word = word_for(job);
+          Id singleton = manager.singleton(word);
+          auto cube = manager.unrestricted();
+          cube[0] = static_cast<std::uint8_t>(1U << word[0]);
+          singleton = manager.filter(singleton, cube);
           return std::vector<Id>{singleton, manager.unite(seed, singleton)};
         },
         [&](std::size_t job, const std::vector<Id>& roots) {
@@ -36,6 +40,8 @@ int main() {
           kept.insert(kept.end(), roots.begin(), roots.end());
         },
         [&]() {
+          if (threads) require(manager.filter_cache_bytes() == 0,
+                               "finished workers retained dense filter buffers at the merge barrier");
           std::vector<Id*> live{&seed};
           for (auto& root : kept) live.push_back(&root);
           manager.collect(live);
