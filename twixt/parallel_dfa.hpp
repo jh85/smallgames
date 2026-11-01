@@ -33,11 +33,21 @@ inline void delta_u32(std::ostream& out, std::uint32_t value) {
   out.write(bytes, 4);
 }
 
+inline void delta_u64(std::ostream& out, std::uint64_t value) {
+  delta_u32(out, static_cast<std::uint32_t>(value));
+  delta_u32(out, static_cast<std::uint32_t>(value >> 32));
+}
+
 inline std::uint32_t delta_u32(std::istream& in) {
   unsigned char bytes[4];
   if (!in.read(reinterpret_cast<char*>(bytes), 4)) throw std::runtime_error("truncated worker delta");
   return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
          (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+inline std::uint64_t delta_u64(std::istream& in) {
+  const std::uint64_t low = delta_u32(in);
+  return low | (static_cast<std::uint64_t>(delta_u32(in)) << 32);
 }
 
 // Old IDs [0,base) are shared with the fork's parent. Only reachable NEW
@@ -55,7 +65,7 @@ inline void write_delta(Manager& manager, const std::string& path, Id base,
     stack.push_back(id);
   };
   for (Id root : roots) mark(root);
-  std::uint32_t count = 0;
+  std::uint64_t count = 0;
   while (!stack.empty()) {
     const Id id = stack.back(); stack.pop_back();
     ++count;
@@ -68,18 +78,18 @@ inline void write_delta(Manager& manager, const std::string& path, Id base,
   auto encode = [&](Id id) { return id < base ? id : mapped[id - base]; };
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) throw std::runtime_error("cannot create worker delta: " + path);
-  out.write("TWXDEL01", 8);
+  out.write("TWXDEL02", 8);  // 64-bit node IDs
   delta_u32(out, manager.length());
-  delta_u32(out, base);
-  delta_u32(out, count);
+  delta_u64(out, base);
+  delta_u64(out, count);
   delta_u32(out, static_cast<std::uint32_t>(roots.size()));
   for (auto n : manager.alphabet()) out.put(static_cast<char>(n));
-  for (Id root : roots) delta_u32(out, encode(root));
+  for (Id root : roots) delta_u64(out, encode(root));
   for (std::size_t i = 0; i < added; ++i) {
     if (!live[i]) continue;
-    const Node& node = manager.node(static_cast<Id>(base + i));
+    const Node node = manager.node(static_cast<Id>(base + i));
     delta_u32(out, node.level);
-    for (Id child : node.next) delta_u32(out, encode(child));
+    for (Id child : node.next) delta_u64(out, encode(child));
     if ((i & 0x3fffU) == 0) manager.checkpoint();
   }
   out.close();
@@ -92,10 +102,10 @@ inline std::vector<Id> read_delta(Manager& manager, const std::string& path,
   if (!in) throw std::runtime_error("missing worker delta: " + path);
   char magic[8]{};
   in.read(magic, 8);
-  if (std::string(magic, 8) != "TWXDEL01" || delta_u32(in) != manager.length()) {
+  if (std::string(magic, 8) != "TWXDEL02" || delta_u32(in) != manager.length()) {
     throw std::runtime_error("wrong worker delta schema");
   }
-  const Id base = delta_u32(in), count = delta_u32(in);
+  const Id base = delta_u64(in), count = delta_u64(in);
   if (base != expected_base || base > manager.size() || delta_u32(in) != root_count ||
       count > std::numeric_limits<Id>::max() - base) {
     throw std::runtime_error("wrong worker snapshot or root count");
@@ -106,20 +116,20 @@ inline std::vector<Id> read_delta(Manager& manager, const std::string& path,
   const auto offset = in.tellg();
   in.seekg(0, std::ios::end);
   const std::uint64_t expected = static_cast<std::uint64_t>(offset) +
-                                4ULL * root_count + 16ULL * count;
+                                8ULL * root_count + 28ULL * count;
   if (static_cast<std::uint64_t>(in.tellg()) != expected) throw std::runtime_error("wrong worker delta length");
   in.seekg(offset);
   std::vector<Id> roots(root_count), mapped(count);
-  for (auto& root : roots) root = delta_u32(in);
-  auto decode = [&](Id id, std::uint32_t available) -> Id {
+  for (auto& root : roots) root = delta_u64(in);
+  auto decode = [&](Id id, std::uint64_t available) -> Id {
     if (id < base) return id;
     if (id - base >= available) throw std::runtime_error("invalid worker delta reference");
     return mapped[id - base];
   };
-  for (std::uint32_t i = 0; i < count; ++i) {
+  for (std::uint64_t i = 0; i < count; ++i) {
     const unsigned level = delta_u32(in);
     Children children{};
-    for (Id& child : children) child = decode(delta_u32(in), i);
+    for (Id& child : children) child = decode(delta_u64(in), i);
     mapped[i] = manager.intern(level, children);
   }
   for (auto& root : roots) {
@@ -136,6 +146,9 @@ struct ProcessOptions {
   std::uint64_t memory_bytes = 0;  // Linux RSS for threads, aggregate PSS for processes; 0 disables
   std::string temporary_directory = "tables";
   bool threads = true;
+  // Threads only: jobs per wave (barrier), at least `workers`; 0 = workers.
+  // Larger waves let `workers` threads share more, smaller jobs.
+  std::size_t wave_jobs = 0;
 };
 
 struct ProcessStats {
@@ -336,20 +349,22 @@ ProcessStats thread_jobs(Manager& manager, const ProcessOptions& options,
   using Clock = std::chrono::steady_clock;
   const auto started = Clock::now();
   ProcessStats stats;
-  for (std::size_t first = 0; first < job_count; first += options.workers) {
+  const std::size_t wave = std::max<std::size_t>(options.workers, options.wave_jobs);
+  for (std::size_t first = 0; first < job_count; first += wave) {
     manager.checkpoint();
-    const unsigned count = static_cast<unsigned>(std::min<std::size_t>(options.workers, job_count - first));
-    stats.peak_workers = std::max(stats.peak_workers, count);
+    const unsigned count = static_cast<unsigned>(std::min<std::size_t>(wave, job_count - first));
+    const unsigned threads = std::min(options.workers, count);
+    stats.peak_workers = std::max(stats.peak_workers, threads);
     std::vector<std::vector<Id>> results(count);
     std::vector<std::thread> workers;
-    workers.reserve(count);
-    std::atomic<unsigned> next{0}, remaining{count};
+    workers.reserve(threads);
+    std::atomic<unsigned> next{0}, remaining{threads};
     std::atomic<unsigned> active{0}, high{0};
     std::exception_ptr worker_error, coordinator_error;
     std::mutex error_mutex;
-    manager.prepare_workers(count);
+    manager.prepare_workers(threads);
     try {
-      for (unsigned slot = 1; slot <= count; ++slot) {
+      for (unsigned slot = 1; slot <= threads; ++slot) {
         workers.emplace_back([&, slot]() {
           Manager::WorkerScope binding(manager, slot);
           try {
@@ -363,6 +378,7 @@ ProcessStats thread_jobs(Manager& manager, const ProcessOptions& options,
               catch (...) { active.fetch_sub(1); throw; }
               active.fetch_sub(1);
               if (results[job].size() != root_count) throw std::logic_error("wrong worker result arity");
+              manager.release_worker_filter_buffers();  // per-job scratch; the thread may take another job
             }
           } catch (...) {
             std::lock_guard<std::mutex> guard(error_mutex);

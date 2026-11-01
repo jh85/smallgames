@@ -1,5 +1,6 @@
 #include "parallel_dfa.hpp"
 
+#include <atomic>
 #include <iostream>
 
 using namespace twixt_dfa;
@@ -48,6 +49,39 @@ int main() {
         });
     require(stats.peak_workers == 64, "64-worker scheduler did not launch a full wave");
     require(std::filesystem::is_empty(options.temporary_directory), "worker scratch was not cleaned");
+    if (threads) {
+      // Waves larger than the thread count: 250 jobs, 7 threads, 100 jobs per
+      // wave; every job runs once and each wave ends in one barrier.
+      ProcessOptions wide = options;
+      wide.workers = 7;
+      wide.wave_jobs = 100;
+      std::vector<std::atomic<int>> runs(250);
+      std::vector<Id> wave_roots;
+      int barriers = 0;
+      std::size_t consumed = 0;
+      const auto wide_stats = parallel_jobs(manager, wide, runs.size(), 1,
+          [&](std::size_t job) {
+            runs[job].fetch_add(1);
+            return std::vector<Id>{manager.singleton(word_for(job % 36))};
+          },
+          [&](std::size_t job, const std::vector<Id>& roots) {
+            require(job == consumed++, "wave results consumed out of order");
+            require(manager.contains(roots[0], word_for(job % 36)), "wave job result");
+            wave_roots.push_back(roots[0]);
+          },
+          [&]() {
+            ++barriers;
+            require(consumed == std::min<std::size_t>(250, 100 * static_cast<std::size_t>(barriers)),
+                    "barrier before its wave finished");
+            std::vector<Id*> live{&seed};
+            for (auto& root : kept) live.push_back(&root);
+            for (auto& root : wave_roots) live.push_back(&root);
+            manager.collect(live);
+          });
+      for (const auto& r : runs) require(r.load() == 1, "wave job ran other than once");
+      require(barriers == 3, "100-job waves over 250 jobs need three barriers");
+      require(wide_stats.peak_workers == 7, "wide waves launched more threads than workers");
+    }
 
     // A base-only language generates a zero-node delta. A wrong snapshot ID
     // must be rejected instead of silently binding references to another DAG.
@@ -92,7 +126,8 @@ int main() {
     for (unsigned slot = 0; slot < 64; ++slot) {
       writers.emplace_back([&, slot]() {
         for (unsigned i = 0; i < 2048; ++i) {
-          ids[slot * 2048 + i] = store.append(Node{{slot, i, 0}, slot + i});
+          // Packed nodes keep 8-bit levels; children may use all 40 bits.
+          ids[slot * 2048 + i] = store.append(Node{{slot, i, (Id{1} << 39) + slot * 2048 + i}, (slot + i) % 251});
         }
       });
     }
@@ -101,8 +136,8 @@ int main() {
     for (unsigned slot = 0; slot < 64; ++slot) {
       for (unsigned i = 0; i < 2048; ++i) {
         const Node& node = store.at(ids[slot * 2048 + i]);
-        require(node.next[0] == slot && node.next[1] == i && node.level == slot + i,
-                "concurrent node publication was corrupted");
+        require(node.next[0] == slot && node.next[1] == i && node.next[2] == (Id{1} << 39) + slot * 2048 + i &&
+                node.level == (slot + i) % 251, "concurrent node publication was corrupted");
       }
     }
     std::sort(ids.begin(), ids.end());

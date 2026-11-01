@@ -7,11 +7,23 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstdarg>
+#include <map>
+#include <filesystem>
+#include <cstring>
+#include <malloc.h>
+#include <fcntl.h>
+#include <functional>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
 #include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -139,6 +151,9 @@ struct Options {
   int symbolic_ply = -1;
   std::size_t dfa_max_nodes = 5'000'000;
   unsigned workers = 1;
+  unsigned level_threads = 0;  // threads for level-by-level operations; 0 = workers
+  bool single_wave = false;    // all tasks of a ply in one wave
+  std::size_t sample_check = 0;  // per solved ply: check this many sampled positions against the rules
   std::size_t parallel_min_nodes = 20'000;
   std::uint64_t parallel_memory_gb = 512;
   std::string parallel_temp_directory = "tables";
@@ -148,6 +163,16 @@ struct Options {
   std::string dfa_checkpoint;
   std::string resume_dfa;
   std::string compare_dfa;
+  int turn_sharing_stats = 0;  // diagnostic: 1 = retained graph, 2 = also images
+  std::string layer_dir;       // per-layer storage directory (manifest + layer files)
+  std::string merge_layers;    // write a monolithic archive of a stored solution
+  long retrograde_stop = -1;   // testing: stop after solving this retrograde ply
+  std::uint64_t dfa_id_base = 2;  // testing: first nonterminal DFA node ID
+  bool classify_last = false;  // diagnostic: recompute the last layer's terminal-loss set
+  std::string layer_roundtrip;  // diagnostic: rewrite the last forward layer here and reload it
+  std::string convert_layers;   // rewrite every stored layer of the resumed manifest into this directory
+  int image_check = -1;         // diagnostic: compare memo and level images of the last layer for this move
+  int preimage_check = -1;      // diagnostic: compare memo and level preimages of the last terminal-loss set
   std::string db_out;
   std::string probe_db;
 };
@@ -1708,6 +1733,20 @@ void print_help(const char* program) {
       << "  --compare-dfa PATH    compare exact languages with a solution/forward checkpoint\n"
       << "  --dfa-checkpoint PATH atomically checkpoint each symbolic layer\n"
       << "  --resume-dfa PATH     resume a checkpoint (uses a fresh time budget)\n"
+      << "  --layer-dir DIR       store each finished layer in DIR (manifest DIR/manifest.twxman);\n"
+      << "                        keeps only the layers a step needs in memory\n"
+      << "  --merge-layers PATH   with --resume-dfa MANIFEST: write one monolithic archive\n"
+      << "  --retrograde-stop K   testing: stop after committing retrograde ply K\n"
+      << "  --single-wave         run all of a ply's tasks in one wave (one union and GC per ply)\n"
+      << "  --sample-check N      with --layer-dir: check N sampled positions of each solved ply\n"
+      << "                        against the explicit rules before committing it\n"
+      << "  --level-threads N     threads for level-by-level unions, set operations, classification\n"
+      << "                        and layer files (default: --workers)\n"
+      << "  --dfa-id-base N       testing: number DFA nodes from N (exercise IDs above 2^32)\n"
+      << "  --turn-sharing-stats  with --resume-dfa: count nodes if the turn bit split no suffixes\n"
+      << "  --turn-sharing-images same, and count new nodes of every image of the last layer\n"
+      << "  (memory profiling: TWIXT_PROFILE=PATH [TWIXT_PROFILE_MALLINFO/_SCAN/_REACH=1];\n"
+      << "   classic paths: TWIXT_CLASSIC_IMAGE/_PREIMAGE/_WON=1; TWIXT_NO_TRIM=1)\n"
       << "  --census-max-states N stop before a layer exceeds N states (default: 1M)\n"
       << "  --census-seconds S    census/strong/symbolic time cap; 0 disables (default: 10)\n"
       << "  --strong              enumerate and retrograde-solve every reachable state\n"
@@ -1798,6 +1837,38 @@ Options parse_options(int argc, char** argv) {
       options.dfa_out = value("--dfa-out");
     } else if (arg == "--probe-dfa") {
       options.probe_dfa = value("--probe-dfa");
+    } else if (arg == "--turn-sharing-stats") {
+      options.turn_sharing_stats = 1;
+    } else if (arg == "--turn-sharing-images") {
+      options.turn_sharing_stats = 2;
+    } else if (arg == "--layer-dir") {
+      options.layer_dir = value("--layer-dir");
+    } else if (arg == "--merge-layers") {
+      options.merge_layers = value("--merge-layers");
+    } else if (arg == "--classify-last") {
+      options.classify_last = true;
+    } else if (arg == "--sample-check") {
+      options.sample_check = parse_size_t(value("--sample-check"), "--sample-check");
+    } else if (arg == "--single-wave") {
+      options.single_wave = true;
+    } else if (arg == "--level-threads") {
+      options.level_threads = static_cast<unsigned>(std::stoul(value("--level-threads")));
+      if (options.level_threads == 0 || options.level_threads > 256) throw std::invalid_argument("--level-threads must be in [1, 256]");
+    } else if (arg == "--preimage-check") {
+      options.preimage_check = std::stoi(value("--preimage-check"));
+    } else if (arg == "--image-check") {
+      options.image_check = std::stoi(value("--image-check"));
+    } else if (arg == "--convert-layers") {
+      options.convert_layers = value("--convert-layers");
+    } else if (arg == "--layer-roundtrip") {
+      options.layer_roundtrip = value("--layer-roundtrip");
+    } else if (arg == "--dfa-id-base") {
+      options.dfa_id_base = parse_size_t(value("--dfa-id-base"), "--dfa-id-base");
+      if (options.dfa_id_base < 2 || options.dfa_id_base >= (1ULL << 39)) {
+        throw std::invalid_argument("--dfa-id-base must be in [2, 2^39)");
+      }
+    } else if (arg == "--retrograde-stop") {
+      options.retrograde_stop = static_cast<long>(parse_size_t(value("--retrograde-stop"), "--retrograde-stop"));
     } else if (arg == "--compare-dfa") {
       options.compare_dfa = value("--compare-dfa");
     } else if (arg == "--dfa-checkpoint") {
@@ -1870,6 +1941,15 @@ int run(int argc, char** argv) {
   if (!options.resume_dfa.empty() && !options.moves.empty()) {
     throw std::invalid_argument("--resume-dfa uses the saved root; --moves cannot change it");
   }
+  if (!options.layer_dir.empty() && !options.dfa_checkpoint.empty()) {
+    throw std::invalid_argument("--layer-dir keeps its own manifest; do not combine it with --dfa-checkpoint");
+  }
+  if (!options.layer_dir.empty() && !options.symbolic) {
+    throw std::invalid_argument("--layer-dir requires symbolic solving or --resume-dfa");
+  }
+  if (!options.merge_layers.empty() && options.resume_dfa.empty()) {
+    throw std::invalid_argument("--merge-layers requires --resume-dfa MANIFEST");
+  }
   if (!options.dfa_out.empty() && options.dfa_out == options.dfa_checkpoint) {
     throw std::invalid_argument("solution and checkpoint paths must differ");
   }
@@ -1885,10 +1965,159 @@ int run(int argc, char** argv) {
   }
   if (options.symbolic || options.symbolic_verify) std::cout << std::unitbuf;
   std::unique_ptr<SymbolicDatabase> resumed;
+  if (!options.merge_layers.empty()) options.dfa_max_nodes = 0;  // a merge holds the whole solution
   if (!options.resume_dfa.empty()) {
     resumed = std::make_unique<SymbolicDatabase>(options.resume_dfa, &options);
     options.width = resumed->width();
     options.height = resumed->height();
+    if (options.turn_sharing_stats != 0) {
+      turn_sharing_stats(resumed->solution(), options.turn_sharing_stats == 2);
+      return 0;
+    }
+    if (options.preimage_check >= 0) {
+      SymbolicTwixt& solution = resumed->solution();
+      const std::size_t last = solution.layers().size() - 1;
+      if (solution.layer_store()) solution.load_forward(last);
+      // The terminal-loss set of the last layer stands in for a solved layer:
+      // its preimage under a move of the previous mover.
+      const DfaId target = solution.layers()[last].terminal_loss;
+      const Player mover = solution.turn(last - 1);
+      auto since = [](auto t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+      auto t0 = std::chrono::steady_clock::now();
+      const DfaId level = solution.level_fused_preimage(target, options.preimage_check, mover);
+      const double level_seconds = since(t0);
+      const auto level_sets = profile_fused_memo;
+      t0 = std::chrono::steady_clock::now();
+      const DfaId memo = solution.fused_preimage(target, options.preimage_check, mover);
+      const double memo_seconds = since(t0);
+      std::cout << "preimage check ply " << last << " move " << options.preimage_check << ": "
+                << (level == memo ? "MATCH" : "MISMATCH") << ", root " << memo << ", level " << level_seconds
+                << " s (" << level_sets << " sets), memo " << memo_seconds << " s (" << profile_fused_memo
+                << " entries, " << profile_fused_multi << " multi)\n";
+      return level == memo ? 0 : 1;
+    }
+    if (options.image_check >= 0) {
+      SymbolicTwixt& solution = resumed->solution();
+      const std::size_t last = solution.layers().size() - 1;
+      if (solution.layer_store()) solution.load_forward(last);
+      const DfaId active = solution.layers()[last].active;
+      const Player mover = solution.turn(last);
+      auto since = [](auto t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+      auto t0 = std::chrono::steady_clock::now();
+      const DfaId level = solution.level_fused_image(active, options.image_check, mover);
+      const double level_seconds = since(t0);
+      const auto level_pairs = profile_fused_memo;
+      t0 = std::chrono::steady_clock::now();
+      const DfaId memo = solution.fused_image(active, options.image_check, mover);
+      const double memo_seconds = since(t0);
+      std::cout << "image check ply " << last << " move " << options.image_check << ": "
+                << (level == memo ? "MATCH" : "MISMATCH") << ", root " << memo << ", level " << level_seconds
+                << " s (" << level_pairs << " pairs), memo " << memo_seconds << " s (" << profile_fused_memo
+                << " entries)\n";
+      return level == memo ? 0 : 1;
+    }
+    if (!options.convert_layers.empty()) {
+      // Read-only on the source store: each layer is loaded, written to the
+      // destination in the current format, and dropped.  The destination
+      // gets no manifest; LAYERS.txt lists "kind ply file bytes checksum nodes".
+      SymbolicTwixt& solution = resumed->solution();
+      LayerStore* source = solution.layer_store();
+      if (source == nullptr) throw std::invalid_argument("--convert-layers needs a layer manifest");
+      LayerStore copy(options.convert_layers, resumed->width(), resumed->height(), solution.manager().length());
+      if (std::filesystem::exists(copy.manifest_path())) throw std::invalid_argument("--convert-layers directory has a manifest");
+      copy.set_threads(options.level_threads ? options.level_threads : std::max(1U, options.workers));
+      std::ofstream listing(options.convert_layers + "/LAYERS.txt", std::ios::app);
+      for (unsigned kind : {LayerStore::kForward, LayerStore::kResult}) {
+        const auto& files = kind == LayerStore::kForward ? source->forward : source->result;
+        for (std::size_t ply = 0; ply < files.size(); ++ply) {
+          if (!files[ply].present()) continue;
+          const std::string existing = options.convert_layers + "/" + files[ply].name;
+          if (std::filesystem::exists(existing)) continue;  // resumable
+          const auto started = std::chrono::steady_clock::now();
+          std::vector<DfaId> roots = source->read(solution.manager(), kind, ply);
+          copy.write(solution.manager(), kind, ply, roots);
+          const LayerFile& out = (kind == LayerStore::kForward ? copy.forward : copy.result)[ply];
+          if (out.nodes != files[ply].nodes) throw std::logic_error("converted layer node count differs");
+          // Reload the copy into the same manager: identical roots prove identical languages.
+          if (copy.read(solution.manager(), kind, ply) != roots) throw std::logic_error("converted layer differs");
+          listing << (kind == LayerStore::kForward ? "forward " : "result ") << ply << ' ' << out.name << ' '
+                  << out.bytes << ' ' << out.checksum << ' ' << out.nodes << std::endl;
+          std::vector<DfaId*> none;
+          solution.manager().collect(none, std::max(1U, options.workers));
+          std::cout << (kind == LayerStore::kForward ? "forward " : "result ") << ply << ": " << out.nodes
+                    << " nodes, " << out.bytes << " bytes, "
+                    << std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() << " s\n"
+                    << std::flush;
+        }
+      }
+      return 0;
+    }
+    if (!options.layer_roundtrip.empty()) {
+      SymbolicTwixt& solution = resumed->solution();
+      if (solution.layer_store() == nullptr) throw std::invalid_argument("--layer-roundtrip needs a layer manifest");
+      const std::size_t last = solution.layers().size() - 1;
+      solution.load_forward(last);
+      const auto& layer = solution.layers()[last];
+      const std::vector<DfaId> roots{layer.reachable, layer.terminal_loss, layer.terminal_draw, layer.active};
+      LayerStore copy(options.layer_roundtrip, resumed->width(), resumed->height(), solution.manager().length());
+      if (std::filesystem::exists(copy.manifest_path())) throw std::invalid_argument("--layer-roundtrip directory has a manifest");
+      copy.set_threads(options.level_threads ? options.level_threads : std::max(1U, options.workers));
+      auto clock = [] { return std::chrono::steady_clock::now(); };
+      auto since = [](auto t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+      auto t0 = clock();
+      copy.write(solution.manager(), LayerStore::kForward, last, roots);
+      const double write_seconds = since(t0);
+      t0 = clock();
+      const auto back = copy.read(solution.manager(), LayerStore::kForward, last);
+      const double read_seconds = since(t0);
+      std::cout << "layer roundtrip ply " << last << ": " << (back == roots ? "MATCH" : "MISMATCH") << ", "
+                << copy.forward[last].nodes << " nodes, " << copy.forward[last].bytes << " bytes, write "
+                << write_seconds << " s, read " << read_seconds << " s\n";
+      return back == roots ? 0 : 1;
+    }
+    if (options.classify_last) {
+      SymbolicTwixt& solution = resumed->solution();
+      const std::size_t last = solution.layers().size() - 1;
+      if (solution.layer_store()) solution.load_forward(last);
+      const auto& layer = solution.layers()[last];
+      const auto started = std::chrono::steady_clock::now();
+      const DfaId recomputed = solution.won(layer.reachable, other(solution.turn(last)));
+      const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+      std::cout << "classify ply " << last << ": " << (recomputed == layer.terminal_loss ? "MATCH" : "MISMATCH")
+                << " stored terminal-loss set; " << seconds << " s; " << solution.won_stats() << '\n';
+      // The remaining classification steps, through the whole-layer operations.
+      const auto ops_started = std::chrono::steady_clock::now();
+      SymbolWord no_moves = solution.manager().unrestricted();
+      const Twixt classify_game(resumed->width(), resumed->height());
+      for (int cell = 0; cell < classify_game.cell_count(); ++cell) {
+        if (classify_game.legal_cell(cell, solution.turn(last))) no_moves[solution.cell_level(cell)] = 6;
+      }
+      const DfaId exhausted = solution.manager().filter(layer.reachable, no_moves);
+      const DfaId draw = solution.layer_difference(exhausted, layer.terminal_loss);
+      const DfaId active = solution.layer_difference(layer.reachable, solution.layer_union(layer.terminal_loss, draw));
+      const double ops_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ops_started).count();
+      const bool same = draw == layer.terminal_draw && active == layer.active;
+      std::cout << "classify ply " << last << ": " << (same ? "MATCH" : "MISMATCH")
+                << " stored terminal-draw and active sets; " << ops_seconds << " s\n";
+      return recomputed == layer.terminal_loss && same ? 0 : 1;
+    }
+    if (!options.merge_layers.empty()) {
+      SymbolicTwixt& solution = resumed->solution();
+      if (solution.layer_store() == nullptr) throw std::invalid_argument("--merge-layers needs a layer manifest");
+      const Twixt merge_game(resumed->width(), resumed->height());
+      solution.materialize_layers();
+      if (resumed->phase() == 2) {
+        save_symbolic(options.merge_layers, merge_game, solution);
+      } else {
+        save_symbolic_archive(options.merge_layers, merge_game, solution, true, resumed->phase(), resumed->remaining());
+        std::cout << "Checkpoint written to " << options.merge_layers << '\n';
+      }
+      return 0;
+    }
+    if (!options.layer_dir.empty() && resumed->solution().layer_store() != nullptr &&
+        std::filesystem::path(options.layer_dir) != std::filesystem::path(resumed->solution().layer_store()->dir())) {
+      throw std::invalid_argument("--layer-dir differs from the resumed manifest's directory");
+    }
   }
   std::unique_ptr<SymbolicDatabase> symbolic_database;
   if (!options.probe_dfa.empty()) {
@@ -1946,6 +2175,7 @@ int run(int argc, char** argv) {
       throw std::logic_error("minimal acyclic DFA test failed");
     }
     symbolic_move_self_test();
+    fused_image_self_test();
     std::cout << "self-test: ok\n";
     return 0;
   }

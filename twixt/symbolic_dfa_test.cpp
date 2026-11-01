@@ -11,12 +11,12 @@ void require(bool test, const char* message) {
   if (!test) throw std::runtime_error(message);
 }
 
-int main() {
-  try {
-    // Exhaustively compare every operation to ordinary sets on a mixed
-    // binary/ternary schema.  Includes rejection, overlapping sets, and roots
-    // shared across collection; a wrong merge cannot hide behind a count.
-    Manager manager({3, 2, 3, 2, 3}, 100'000);
+// Exhaustively compare every operation to ordinary sets on a mixed
+// binary/ternary schema.  Includes rejection, overlapping sets, and roots
+// shared across collection; a wrong merge cannot hide behind a count.
+// A large ID base makes every node ID exceed 32 bits.
+void exhaustive(Id base) {
+    Manager manager({3, 2, 3, 2, 3}, 100'000, {}, base);
     std::vector<Word> universe;
     for (unsigned n = 0; n < 108; ++n) {
       unsigned digits = n;
@@ -38,6 +38,13 @@ int main() {
       require(manager.count(x) == a.size() && manager.count(y) == b.size(), "DFA count");
       Id both = manager.intersect(x, y), either = manager.unite(x, y);
       Id diff = manager.difference(x, y);
+      // n-ary union of overlapping, nested, repeated, and empty operands.
+      std::set<Word> c;
+      Id z = 0;
+      for (const auto& word : universe) {
+        if (random() % 5 == 0) { c.insert(word); z = manager.unite(z, manager.singleton(word)); }
+      }
+      Id many = manager.unite_many({x, y, both, z, 0, x, diff});
       const int variable = trial % 5;
       const unsigned before = trial % manager.alphabet()[variable];
       const unsigned after = (before + 1) % manager.alphabet()[variable];
@@ -52,13 +59,14 @@ int main() {
         }
       }
       // Pass an aliased root to catch accidental double-remapping during GC.
-      manager.collect({&x, &y, &both, &either, &diff, &changed, &x});
+      manager.collect({&x, &y, &both, &either, &diff, &changed, &x, &many});
       for (const auto& word : universe) {
         const bool in_a = a.count(word), in_b = b.count(word);
         require(manager.contains(x, word) == in_a, "DFA collection/membership");
         require(manager.contains(both, word) == (in_a && in_b), "DFA intersection");
         require(manager.contains(either, word) == (in_a || in_b), "DFA union");
         require(manager.contains(diff, word) == (in_a && !in_b), "DFA difference");
+        require(manager.contains(many, word) == (in_a || in_b || c.count(word) != 0), "DFA n-ary union");
         require(manager.contains(changed, word) == (expected.count(word) != 0), "DFA conditional rename");
       }
       require(manager.count(changed) == expected.size(), "DFA rename count");
@@ -85,6 +93,14 @@ int main() {
                 "conditional bit preimage");
       }
     }
+    for (Id id : {base}) require(manager.size() >= id, "ID base respected");
+}
+
+int main() {
+  try {
+    exhaustive(2);
+    exhaustive((Id{1} << 32) + 7);
+    exhaustive((Id{1} << 39) - 100'000);
     Manager large(std::vector<std::uint8_t>(64, 2));
     Id all = 1;
     for (int i = 63; i >= 0; --i) all = large.intern(i, {all, all, 0});
