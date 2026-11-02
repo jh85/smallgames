@@ -2729,6 +2729,31 @@ class SymbolicTwixt {
     layers_[ply].draw = dfa_.difference(layers_[ply].reachable, dfa_.unite(layers_[ply].win, layers_[ply].loss));
   }
 
+  // The variable order and game geometry a standalone reader needs
+  // (wdl/layout-*.txt, read by wdl/wdl_query.cpp).
+  void export_layout(std::ostream& out) const {
+    out << "TWIXT-WDL-LAYOUT 1\n";
+    out << "board " << game_.width() << ' ' << game_.height() << "\n";
+    out << "cells " << game_.cell_count() << "\n";
+    for (int c = 0; c < game_.cell_count(); ++c) {
+      out << "cell " << c << ' ' << game_.coordinate(c) << ' ' << game_.legal_cell(c, Player::White) << ' '
+          << game_.legal_cell(c, Player::Black) << "\n";
+    }
+    out << "edges " << game_.edge_count() << "\n";
+    for (int e = 0; e < game_.edge_count(); ++e) out << "edge " << e << ' ' << int(game_.edge(e).a) << ' ' << int(game_.edge(e).b) << "\n";
+    for (int e = 0; e < game_.edge_count(); ++e) {
+      out << "cross " << e;
+      for (int x = 0; x < game_.edge_count(); ++x) if (game_.edges_cross(e, x)) out << ' ' << x;
+      out << "\n";
+    }
+    out << "levels " << variables_.size() << "\n";
+    for (std::size_t i = 0; i < variables_.size(); ++i) {
+      const auto v = variables_[i];
+      if (v.index < 0) out << "level " << i << " turn\n";
+      else out << "level " << i << (v.link ? " link " : " cell ") << v.index << "\n";
+    }
+  }
+
   // Inverse of encode().
   State decode(const SymbolWord& word) const {
     State state;

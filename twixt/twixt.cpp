@@ -171,6 +171,7 @@ struct Options {
   bool classify_last = false;  // diagnostic: recompute the last layer's terminal-loss set
   std::string layer_roundtrip;  // diagnostic: rewrite the last forward layer here and reload it
   std::string convert_layers;   // rewrite every stored layer of the resumed manifest into this directory
+  bool export_layout = false;   // print the board geometry and DFA variable order
   int image_check = -1;         // diagnostic: compare memo and level images of the last layer for this move
   int preimage_check = -1;      // diagnostic: compare memo and level preimages of the last terminal-loss set
   std::string db_out;
@@ -1738,6 +1739,7 @@ void print_help(const char* program) {
       << "  --merge-layers PATH   with --resume-dfa MANIFEST: write one monolithic archive\n"
       << "  --retrograde-stop K   testing: stop after committing retrograde ply K\n"
       << "  --single-wave         run all of a ply's tasks in one wave (one union and GC per ply)\n"
+      << "  --export-layout       with --resume-dfa: print board geometry and DFA variable order\n"
       << "  --sample-check N      with --layer-dir: check N sampled positions of each solved ply\n"
       << "                        against the explicit rules before committing it\n"
       << "  --level-threads N     threads for level-by-level unions, set operations, classification\n"
@@ -1858,6 +1860,8 @@ Options parse_options(int argc, char** argv) {
       options.preimage_check = std::stoi(value("--preimage-check"));
     } else if (arg == "--image-check") {
       options.image_check = std::stoi(value("--image-check"));
+    } else if (arg == "--export-layout") {
+      options.export_layout = true;
     } else if (arg == "--convert-layers") {
       options.convert_layers = value("--convert-layers");
     } else if (arg == "--layer-roundtrip") {
@@ -2015,6 +2019,10 @@ int run(int argc, char** argv) {
                 << " s (" << level_pairs << " pairs), memo " << memo_seconds << " s (" << profile_fused_memo
                 << " entries)\n";
       return level == memo ? 0 : 1;
+    }
+    if (options.export_layout) {
+      resumed->solution().export_layout(std::cout);
+      return 0;
     }
     if (!options.convert_layers.empty()) {
       // Read-only on the source store: each layer is loaded, written to the

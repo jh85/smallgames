@@ -1,0 +1,290 @@
+TWIXT-WDL-LAYOUT 1
+board 6 6
+cells 36
+cell 0 A1 0 0
+cell 1 B1 1 0
+cell 2 C1 1 0
+cell 3 D1 1 0
+cell 4 E1 1 0
+cell 5 F1 0 0
+cell 6 A2 0 1
+cell 7 B2 1 1
+cell 8 C2 1 1
+cell 9 D2 1 1
+cell 10 E2 1 1
+cell 11 F2 0 1
+cell 12 A3 0 1
+cell 13 B3 1 1
+cell 14 C3 1 1
+cell 15 D3 1 1
+cell 16 E3 1 1
+cell 17 F3 0 1
+cell 18 A4 0 1
+cell 19 B4 1 1
+cell 20 C4 1 1
+cell 21 D4 1 1
+cell 22 E4 1 1
+cell 23 F4 0 1
+cell 24 A5 0 1
+cell 25 B5 1 1
+cell 26 C5 1 1
+cell 27 D5 1 1
+cell 28 E5 1 1
+cell 29 F5 0 1
+cell 30 A6 0 0
+cell 31 B6 1 0
+cell 32 C6 1 0
+cell 33 D6 1 0
+cell 34 E6 1 0
+cell 35 F6 0 0
+edges 72
+edge 0 1 14
+edge 1 1 9
+edge 2 1 12
+edge 3 2 15
+edge 4 2 10
+edge 5 2 13
+edge 6 2 6
+edge 7 3 16
+edge 8 3 11
+edge 9 3 14
+edge 10 3 7
+edge 11 4 17
+edge 12 4 15
+edge 13 4 8
+edge 14 6 19
+edge 15 6 14
+edge 16 7 20
+edge 17 7 15
+edge 18 7 18
+edge 19 8 21
+edge 20 8 16
+edge 21 8 19
+edge 22 8 12
+edge 23 9 22
+edge 24 9 17
+edge 25 9 20
+edge 26 9 13
+edge 27 10 23
+edge 28 10 21
+edge 29 10 14
+edge 30 11 22
+edge 31 11 15
+edge 32 12 25
+edge 33 12 20
+edge 34 13 26
+edge 35 13 21
+edge 36 13 24
+edge 37 14 27
+edge 38 14 22
+edge 39 14 25
+edge 40 14 18
+edge 41 15 28
+edge 42 15 23
+edge 43 15 26
+edge 44 15 19
+edge 45 16 29
+edge 46 16 27
+edge 47 16 20
+edge 48 17 28
+edge 49 17 21
+edge 50 18 31
+edge 51 18 26
+edge 52 19 32
+edge 53 19 27
+edge 54 20 33
+edge 55 20 28
+edge 56 20 31
+edge 57 20 24
+edge 58 21 34
+edge 59 21 29
+edge 60 21 32
+edge 61 21 25
+edge 62 22 33
+edge 63 22 26
+edge 64 23 34
+edge 65 23 27
+edge 66 24 32
+edge 67 25 33
+edge 68 26 34
+edge 69 27 31
+edge 70 28 32
+edge 71 29 33
+cross 0 5 6 10 17 21 22 26
+cross 1 3 5 6 9 10 13
+cross 2 6 14 15
+cross 3 1 9 10 13 20 25 26 29
+cross 4 7 9 10 12 13
+cross 5 0 1 10 15 16 17 22
+cross 6 0 1 2
+cross 7 4 12 13 24 28 29 31
+cross 8 11 12 13
+cross 9 1 3 4 13 17 19 20 26
+cross 10 0 1 3 4 5
+cross 11 8 30 31
+cross 12 4 7 8 20 23 24 29
+cross 13 1 3 4 7 8 9
+cross 14 2 18 22 33 36 40
+cross 15 2 5 16 18 21 22 26
+cross 16 5 15 21 22 26 35 39 40 44
+cross 17 0 5 9 19 21 22 25 26 29
+cross 18 14 15 22 32 33
+cross 19 9 17 25 26 29 38 43 44 47
+cross 20 3 9 12 23 25 26 28 29 31
+cross 21 0 15 16 17 26 33 34 35 40
+cross 22 0 5 14 15 16 17 18
+cross 23 12 20 28 29 31 42 46 47 49
+cross 24 7 12 27 28 29 30 31
+cross 25 3 17 19 20 29 35 37 38 44
+cross 26 0 3 9 15 16 17 19 20 21
+cross 27 24 30 31 48 49
+cross 28 7 20 23 24 31 38 41 42 47
+cross 29 3 7 12 17 19 20 23 24 25
+cross 30 11 24 27 42 45 49
+cross 31 7 11 20 23 24 27 28
+cross 32 18 36 40 51 57
+cross 33 14 18 21 34 36 39 40 44
+cross 34 21 33 39 40 44 53 56 57 61
+cross 35 16 21 25 37 39 40 43 44 47
+cross 36 14 32 33 40 50 51
+cross 37 25 35 43 44 47 55 60 61 63
+cross 38 19 25 28 41 43 44 46 47 49
+cross 39 16 33 34 35 44 51 52 53 57
+cross 40 14 16 21 32 33 34 35 36
+cross 41 28 38 46 47 49 59 62 63 65
+cross 42 23 28 30 45 46 47 48 49
+cross 43 19 35 37 38 47 53 54 55 61
+cross 44 16 19 25 33 34 35 37 38 39
+cross 45 30 42 48 49 64 65
+cross 46 23 38 41 42 49 55 58 59 63
+cross 47 19 23 28 35 37 38 41 42 43
+cross 48 27 42 45 59 65
+cross 49 23 27 30 38 41 42 45 46
+cross 50 36 57 66
+cross 51 32 36 39 52 56 57 61
+cross 52 39 51 56 57 61 67 69
+cross 53 34 39 43 54 56 57 60 61 63
+cross 54 43 53 60 61 63 68 69 70
+cross 55 37 43 46 58 60 61 62 63 65
+cross 56 34 51 52 53 61 66 67
+cross 57 32 34 39 50 51 52 53
+cross 58 46 55 62 63 65 70 71
+cross 59 41 46 48 62 63 64 65
+cross 60 37 53 54 55 63 67 68 69
+cross 61 34 37 43 51 52 53 54 55 56
+cross 62 41 55 58 59 65 68 70
+cross 63 37 41 46 53 54 55 58 59 60
+cross 64 45 59 71
+cross 65 41 45 48 55 58 59 62
+cross 66 50 56 69
+cross 67 52 56 60 69 70
+cross 68 54 60 62 69 70 71
+cross 69 52 54 60 66 67 68
+cross 70 54 58 62 67 68
+cross 71 58 64 68
+levels 105
+level 0 cell 1
+level 1 cell 2
+level 2 cell 3
+level 3 cell 4
+level 4 cell 6
+level 5 link 6
+level 6 cell 7
+level 7 link 10
+level 8 cell 8
+level 9 link 13
+level 10 cell 9
+level 11 link 1
+level 12 cell 10
+level 13 link 4
+level 14 cell 11
+level 15 link 8
+level 16 cell 12
+level 17 link 2
+level 18 link 22
+level 19 cell 13
+level 20 link 5
+level 21 link 26
+level 22 cell 14
+level 23 link 0
+level 24 link 9
+level 25 link 15
+level 26 link 29
+level 27 cell 15
+level 28 link 3
+level 29 link 12
+level 30 link 17
+level 31 link 31
+level 32 cell 16
+level 33 link 7
+level 34 link 20
+level 35 cell 17
+level 36 link 11
+level 37 link 24
+level 38 cell 18
+level 39 link 18
+level 40 link 40
+level 41 cell 19
+level 42 link 14
+level 43 link 21
+level 44 link 44
+level 45 cell 20
+level 46 link 16
+level 47 link 25
+level 48 link 33
+level 49 link 47
+level 50 cell 21
+level 51 link 19
+level 52 link 28
+level 53 link 35
+level 54 link 49
+level 55 cell 22
+level 56 link 23
+level 57 link 30
+level 58 link 38
+level 59 cell 23
+level 60 link 27
+level 61 link 42
+level 62 cell 24
+level 63 link 36
+level 64 link 57
+level 65 cell 25
+level 66 link 32
+level 67 link 39
+level 68 link 61
+level 69 cell 26
+level 70 link 34
+level 71 link 43
+level 72 link 51
+level 73 link 63
+level 74 cell 27
+level 75 link 37
+level 76 link 46
+level 77 link 53
+level 78 link 65
+level 79 cell 28
+level 80 link 41
+level 81 link 48
+level 82 link 55
+level 83 cell 29
+level 84 link 45
+level 85 link 59
+level 86 cell 31
+level 87 link 50
+level 88 link 56
+level 89 link 69
+level 90 cell 32
+level 91 link 52
+level 92 link 60
+level 93 link 66
+level 94 link 70
+level 95 cell 33
+level 96 link 54
+level 97 link 62
+level 98 link 67
+level 99 link 71
+level 100 cell 34
+level 101 link 58
+level 102 link 64
+level 103 link 68
+level 104 turn
