@@ -1,0 +1,83 @@
+{
+  "board": {
+    "width": 6,
+    "height": 6
+  },
+  "rules": {
+    "first_player": "White",
+    "White_goal": "top-bottom",
+    "Black_goal": "left-right",
+    "automatic_links": true,
+    "crossing_links": false,
+    "pie_rule": false,
+    "link_removal": false
+  },
+  "root_absolute_result": "White win",
+  "root_side_to_move_result": "win",
+  "first_moves": {
+    "win": [
+      "B2",
+      "C2",
+      "D2",
+      "E2",
+      "B3",
+      "C3",
+      "D3",
+      "E3",
+      "B4",
+      "C4",
+      "D4",
+      "E4",
+      "B5",
+      "C5",
+      "D5",
+      "E5"
+    ],
+    "draw": [],
+    "loss": [
+      "B1",
+      "C1",
+      "D1",
+      "E1",
+      "B6",
+      "C6",
+      "D6",
+      "E6"
+    ]
+  },
+  "reachable_positions": 10395631394018,
+  "layers": 33,
+  "largest_ply": {
+    "ply": 21,
+    "reachable_positions": 1482386688972
+  },
+  "wdl_perspective": "side to move",
+  "wdl_totals": {
+    "win": 2642294112527,
+    "draw": 4203834306187,
+    "loss": 3549502975304
+  },
+  "store": {
+    "path": "tables/6x6-store",
+    "format": "TWXMAN01 manifest with one TWXLAY01 file per forward and per result layer",
+    "layer_files": 66,
+    "bytes": 425376692257,
+    "manifest_sha256": "070deceeaea337642ca92dca6ce4dafba730d29d37fe68b2f0d57494cc6bbea1"
+  },
+  "validation": {
+    "all_33_wdl_count_sums_equal_forward_counts": true,
+    "sample_check": "before each ply was committed, 2000 positions drawn uniformly from it were relabelled with the explicit rules from the stored labels of their successors; all 33 plies consistent",
+    "forward_counts_recomputed_from_stored_layers": "plies 0-24 recounted from the layer files; identical to the solver's census lines",
+    "root_probed": true,
+    "independent_exhaustive_verification": false
+  },
+  "execution": {
+    "start": "calibration checkpoint tables/cal-6x6-ply16.twixtckp (plies 0-16 from the earlier production run, ply 16 recomputed)",
+    "driver_start_utc": "2026-11-01T03:11:56Z",
+    "result_utc": "2026-11-02T09:04:29Z",
+    "sum_of_step_wall_times_hours": 26.2,
+    "peak_rss_gib": 659.5,
+    "final_binary": "tables/twixt-solve10 (sha256 prefix d166a4b241e76a5a), built from commit 9647933",
+    "note": "forward plies 17-23 ran on earlier builds of the same branch (see SOLVE_6X6.md); retro ply 16 failed once at load time and was rerun"
+  }
+}

@@ -203,6 +203,7 @@ class Driver:
                                     'advanced': advanced, 'utc': now()})
         if advanced:
             self.state['retry_cap'] = None
+            self.state['failed_once'] = None
             if m is not None and peak > 0:  # recalibrate bytes per predicted slot
                 if kind == 'forward' and target in after['forward']:
                     lk = m['forward'][m['layers'] - 1]['nodes']
@@ -237,6 +238,13 @@ class Driver:
             self.state[key] *= 1.3
             self.log('RETRY %s: memory failure with %d workers (exit %s, peak %.1f GiB); next cap %d workers' %
                      (label, workers, code, peak / (1 << 30), smaller[0]))
+            self.save_state()
+            return True
+        if self.state.get('failed_once') != label:
+            # One retry for an unexplained failure (a rare load-time race was
+            # seen once); a second failure of the same step stops the driver.
+            self.state['failed_once'] = label
+            self.log('RETRY %s: exit %s without progress; retrying once (see %s)' % (label, code, log))
             self.save_state()
             return True
         self.log('FAIL %s: exit %s without progress; stopping (see %s)' % (label, code, log))

@@ -70,6 +70,7 @@ Completed local DFA artifacts (generated files remain ignored by git):
 | 4x5 | Black win | 304,210 | 1,112,064 | `5574ea10ee328c26fed988f9925aae8d6657ba746e7e4baa77afe0051a44cc2d` |
 | 5x5 | Draw | 60,535,612 | 55,171,387 | `54643f75bb27afce1bbd68bcf85dc83f43f3667dac7b9e4ef6fba2a1262d149e` |
 | 5x6 | Black win | 11,101,540,840 | 1,137,466,072 | `7ba2402fd0e8a2e5f4e087f9c7ee1178dd6f0c49b166f44e9cc899c2efee122d` |
+| 6x6 | White win | 10,395,631,394,018 | 425,376,692,257 | manifest `070deceeaea337642ca92dca6ce4dafba730d29d37fe68b2f0d57494cc6bbea1` |
 
 **5x6 has completed all 27 W/L/D layers under the auto-link rules above.** This
 means 5 columns and 6 rows: White moves first and tries to connect top to bottom;
@@ -77,6 +78,8 @@ Black connects left to right. Every one of White's 18 opening moves loses under
 optimal play. The solution has 172,546,666 shared DFA nodes and occupies 1.06 GiB.
 The completed file was successfully reloaded/probed, its SHA-256 was recomputed,
 and each layer's W+D+L count matches its earlier forward reachable count.
+Over all 11,101,540,840 positions the side to move wins 2,809,746,095 (25.3%),
+draws 4,516,000,888 (40.7%), and loses 3,775,793,857 (34.0%).
 Unlike 5x5, 5x6 has **not** been independently exhaustively cross-checked against
 explicit retrograde. Counts and execution/verification metadata are preserved
 in [results/5x6-wdl.csv](results/5x6-wdl.csv) and
@@ -88,6 +91,22 @@ retrograde ply 16 and includes checkpoint loading and output. Earlier forward
 generation, solved layers 17--26, and interrupted attempts are excluded; this
 is not a runtime for a clean solve from the empty board.
 
+**6x6 has completed all 33 W/L/D layers under the same rules.** White wins.
+Sixteen of White's 24 opening moves win (every interior cell, B2-E5); the eight
+on White's own border rows (B1-E1 and B6-E6) lose; none draws. The solution is a
+per-layer store (`tables/6x6-store`: a manifest and 66 layer files, 396 GiB)
+rather than one archive. Over all 10,395,631,394,018 positions the side to move
+wins 2,642,294,112,527 (25.4%), draws 4,203,834,306,187 (40.4%), and loses
+3,549,502,975,304 (34.1%); ply 21 is the largest (1,482,386,688,972 positions).
+Each layer's W+D+L count matches its forward reachable
+count, and before each solved ply was committed, 2,000 positions drawn uniformly
+from it were relabelled with the explicit rules from their successors' stored
+labels, all consistently. Like 5x6, it has **not** been exhaustively
+cross-checked. Counts are in [results/6x6-wdl.csv](results/6x6-wdl.csv) and
+[results/6x6.json](results/6x6.json); the method, measurements, and run history
+are in [SOLVE_6X6.md](SOLVE_6X6.md). The steps from ply 16 took 26.2 hours of
+wall time in total on 64 cores, peaking at 659.5 GiB RSS.
+
 Files are `tables/4x5.twixtdfa`, `tables/5x5.twixtdfa`, and
 `tables/5x6.twixtdfa`. No external archive or DOI has been published.
 Reload/probe examples:
@@ -96,7 +115,11 @@ Reload/probe examples:
 ./twixt --probe-dfa tables/5x5.twixtdfa --quiet
 ./twixt --probe-dfa tables/5x5.twixtdfa --moves C3 --quiet
 ./twixt --probe-dfa tables/5x6.twixtdfa --quiet
+./twixt --probe-dfa tables/6x6-store/manifest.twxman --quiet
 ```
+
+Self-contained WDL packages (result layers, checksums, statistics, and a
+standalone C++ query example) are described in [wdl/README.md](wdl/README.md).
 
 Every opening move on 5x5 draws under optimal play. After White's C3, Black's
 only drawing replies are B3 and D3; the other replies lose. This illustrates
