@@ -70,6 +70,7 @@ Completed local DFA artifacts (generated files remain ignored by git):
 | 4x5 | Black win | 304,210 | 1,112,064 | `5574ea10ee328c26fed988f9925aae8d6657ba746e7e4baa77afe0051a44cc2d` |
 | 5x5 | Draw | 60,535,612 | 55,171,387 | `54643f75bb27afce1bbd68bcf85dc83f43f3667dac7b9e4ef6fba2a1262d149e` |
 | 5x6 | Black win | 11,101,540,840 | 1,137,466,072 | `7ba2402fd0e8a2e5f4e087f9c7ee1178dd6f0c49b166f44e9cc899c2efee122d` |
+| 6x5 | White win | 11,768,029,829 | 8,856,780,030 | manifest `78bc730181cd6d15727475cb5ded0b7cf31bb450fbad8557bf5514e493c291eb` |
 | 6x6 | White win | 10,395,631,394,018 | 425,376,692,257 | manifest `070deceeaea337642ca92dca6ce4dafba730d29d37fe68b2f0d57494cc6bbea1` |
 
 **5x6 has completed all 27 W/L/D layers under the auto-link rules above.** This
@@ -106,6 +107,15 @@ cross-checked. Counts are in [results/6x6-wdl.csv](results/6x6-wdl.csv) and
 [results/6x6.json](results/6x6.json); the method, measurements, and run history
 are in [SOLVE_6X6.md](SOLVE_6X6.md). The steps from ply 16 took 26.2 hours of
 wall time in total on 64 cores, peaking at 659.5 GiB RSS.
+
+**6x5 (6 columns, 5 rows) has completed all 27 W/L/D layers under the same
+rules.** White wins, and every one of White's 20 opening moves wins. Over all
+11,768,029,829 positions the side to move wins 3,066,769,760 (26.1%), draws
+4,470,747,176 (38.0%), and loses 4,230,512,893 (35.9%). The store-mode solve
+took 19 minutes on 64 cores (24.7 GiB peak); every layer's W+D+L count matches
+its forward count and every ply passed the 2,000-position explicit-rules sample
+check. Not exhaustively cross-checked. Counts are in
+[results/6x5-wdl.csv](results/6x5-wdl.csv) and [results/6x5.json](results/6x5.json).
 
 Files are `tables/4x5.twixtdfa`, `tables/5x5.twixtdfa`, and
 `tables/5x6.twixtdfa`. No external archive or DOI has been published.

@@ -6,7 +6,7 @@ solution of one board, ready to query without this repository:
 | file | |
 |---|---|
 | `result-K.twxlay` | positions after K moves: three minimal DFAs (Win, Loss, Draw for the side to move), TWXLAY01 version 2 |
-| `layout.txt` | board geometry and the variable order of a DFA word (`twixt --export-layout`) |
+| `layout.txt` | board geometry and the variable order of a DFA word (`twixt --export-layout`; [5x6](layout-5x6.txt), [6x5](layout-6x5.txt), [6x6](layout-6x6.txt)) |
 | `manifest.twxman` | layer list with sizes and checksums, so `twixt --probe-dfa` can load the package |
 | `wdl_query.cpp` | standalone example ([wdl_query.cpp](wdl_query.cpp)): replay moves, print the outcome |
 | `README.md` | rules, result, and file formats ([5x6](package-README-5x6.md), [6x6](package-README-6x6.md)) |
@@ -24,13 +24,14 @@ g++ -O2 -std=c++17 -o wdl_query wdl_query.cpp
 `wdl_query` rejects illegal moves and moves after a completed connection, and
 decides membership with one sequential pass over a single layer file (one bit
 per node of memory). It agreed with `twixt --probe-dfa` on random move
-sequences: 88 positions on 5x6 (plies 1-26) and 34 on 6x6 (plies 1-12, 20, 26, 32).
+sequences: 88 positions each on 5x6 and 6x5 (plies 1-26) and 34 on 6x6 (plies 1-12, 20, 26, 32).
 
 ## Packages built 2026-11-02
 
 | board | root | reachable positions | archive | archive SHA-256 |
 |---|---|---:|---:|---|
 | 5x6 | Black wins | 11,101,540,840 | 1.4 GB | `07411c893f0511f2b738b3de420498f56e7ab6e0bcd6c2c1c747df183c2fab66` |
+| 6x5 | White wins | 11,768,029,829 | 2.3 GB | `0ac95200c98c2e02266cefb5c98c4aab9a8c0a109f462663b32f600e3bce2dec` |
 | 6x6 | White wins | 10,395,631,394,018 | 152 GB | `385635a29e604c8119017e35b2b0fe0937511ee7f8f06bbcf5fe8ca1860a48c4` |
 
 The archives are kept under the git-ignored `tables/packages/` on the solving

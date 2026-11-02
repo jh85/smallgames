@@ -1,0 +1,75 @@
+{
+  "board": {
+    "width": 6,
+    "height": 5
+  },
+  "rules": {
+    "first_player": "White",
+    "White_goal": "top-bottom",
+    "Black_goal": "left-right",
+    "automatic_links": true,
+    "crossing_links": false,
+    "pie_rule": false,
+    "link_removal": false
+  },
+  "root_absolute_result": "White win",
+  "root_side_to_move_result": "win",
+  "first_moves": {
+    "win": [
+      "B1",
+      "C1",
+      "D1",
+      "E1",
+      "B2",
+      "C2",
+      "D2",
+      "E2",
+      "B3",
+      "C3",
+      "D3",
+      "E3",
+      "B4",
+      "C4",
+      "D4",
+      "E4",
+      "B5",
+      "C5",
+      "D5",
+      "E5"
+    ],
+    "draw": [],
+    "loss": []
+  },
+  "reachable_positions": 11768029829,
+  "layers": 27,
+  "largest_ply": {
+    "ply": 17,
+    "reachable_positions": 2043506616
+  },
+  "wdl_perspective": "side to move",
+  "wdl_totals": {
+    "win": 3066769760,
+    "draw": 4470747176,
+    "loss": 4230512893
+  },
+  "store": {
+    "path": "tables/6x5-store",
+    "format": "TWXMAN01 manifest with one TWXLAY01 file per forward and per result layer",
+    "layer_files": 54,
+    "bytes": 8856780030,
+    "manifest_sha256": "78bc730181cd6d15727475cb5ded0b7cf31bb450fbad8557bf5514e493c291eb"
+  },
+  "validation": {
+    "all_27_wdl_count_sums_equal_forward_counts": true,
+    "sample_check": "before each ply was committed, 2000 positions drawn uniformly from it were relabelled with the explicit rules from the stored labels of their successors; all 27 plies consistent",
+    "root_probed": true,
+    "independent_exhaustive_verification": false
+  },
+  "execution": {
+    "binary": "tables/twixt-solve11 (sha256 prefix 15e497fe1bf75d91), built from commit 751157b",
+    "workers": 64,
+    "wall_time_seconds": 1165.5,
+    "peak_rss_gib": 24.7,
+    "date_utc": "2026-11-02"
+  }
+}

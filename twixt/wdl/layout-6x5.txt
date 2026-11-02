@@ -1,0 +1,224 @@
+TWIXT-WDL-LAYOUT 1
+board 6 5
+cells 30
+cell 0 A1 0 0
+cell 1 B1 1 0
+cell 2 C1 1 0
+cell 3 D1 1 0
+cell 4 E1 1 0
+cell 5 F1 0 0
+cell 6 A2 0 1
+cell 7 B2 1 1
+cell 8 C2 1 1
+cell 9 D2 1 1
+cell 10 E2 1 1
+cell 11 F2 0 1
+cell 12 A3 0 1
+cell 13 B3 1 1
+cell 14 C3 1 1
+cell 15 D3 1 1
+cell 16 E3 1 1
+cell 17 F3 0 1
+cell 18 A4 0 1
+cell 19 B4 1 1
+cell 20 C4 1 1
+cell 21 D4 1 1
+cell 22 E4 1 1
+cell 23 F4 0 1
+cell 24 A5 0 0
+cell 25 B5 1 0
+cell 26 C5 1 0
+cell 27 D5 1 0
+cell 28 E5 1 0
+cell 29 F5 0 0
+edges 54
+edge 0 1 14
+edge 1 1 9
+edge 2 1 12
+edge 3 2 15
+edge 4 2 10
+edge 5 2 13
+edge 6 2 6
+edge 7 3 16
+edge 8 3 11
+edge 9 3 14
+edge 10 3 7
+edge 11 4 17
+edge 12 4 15
+edge 13 4 8
+edge 14 6 19
+edge 15 6 14
+edge 16 7 20
+edge 17 7 15
+edge 18 7 18
+edge 19 8 21
+edge 20 8 16
+edge 21 8 19
+edge 22 8 12
+edge 23 9 22
+edge 24 9 17
+edge 25 9 20
+edge 26 9 13
+edge 27 10 23
+edge 28 10 21
+edge 29 10 14
+edge 30 11 22
+edge 31 11 15
+edge 32 12 25
+edge 33 12 20
+edge 34 13 26
+edge 35 13 21
+edge 36 14 27
+edge 37 14 22
+edge 38 14 25
+edge 39 14 18
+edge 40 15 28
+edge 41 15 23
+edge 42 15 26
+edge 43 15 19
+edge 44 16 27
+edge 45 16 20
+edge 46 17 28
+edge 47 17 21
+edge 48 18 26
+edge 49 19 27
+edge 50 20 28
+edge 51 21 25
+edge 52 22 26
+edge 53 23 27
+cross 0 5 6 10 17 21 22 26
+cross 1 3 5 6 9 10 13
+cross 2 6 14 15
+cross 3 1 9 10 13 20 25 26 29
+cross 4 7 9 10 12 13
+cross 5 0 1 10 15 16 17 22
+cross 6 0 1 2
+cross 7 4 12 13 24 28 29 31
+cross 8 11 12 13
+cross 9 1 3 4 13 17 19 20 26
+cross 10 0 1 3 4 5
+cross 11 8 30 31
+cross 12 4 7 8 20 23 24 29
+cross 13 1 3 4 7 8 9
+cross 14 2 18 22 33 39
+cross 15 2 5 16 18 21 22 26
+cross 16 5 15 21 22 26 35 38 39 43
+cross 17 0 5 9 19 21 22 25 26 29
+cross 18 14 15 22 32 33
+cross 19 9 17 25 26 29 37 42 43 45
+cross 20 3 9 12 23 25 26 28 29 31
+cross 21 0 15 16 17 26 33 34 35 39
+cross 22 0 5 14 15 16 17 18
+cross 23 12 20 28 29 31 41 44 45 47
+cross 24 7 12 27 28 29 30 31
+cross 25 3 17 19 20 29 35 36 37 43
+cross 26 0 3 9 15 16 17 19 20 21
+cross 27 24 30 31 46 47
+cross 28 7 20 23 24 31 37 40 41 45
+cross 29 3 7 12 17 19 20 23 24 25
+cross 30 11 24 27 41 47
+cross 31 7 11 20 23 24 27 28
+cross 32 18 39 48
+cross 33 14 18 21 34 38 39 43
+cross 34 21 33 38 39 43 49 51
+cross 35 16 21 25 36 38 39 42 43 45
+cross 36 25 35 42 43 45 50 51 52
+cross 37 19 25 28 40 42 43 44 45 47
+cross 38 16 33 34 35 43 48 49
+cross 39 14 16 21 32 33 34 35
+cross 40 28 37 44 45 47 52 53
+cross 41 23 28 30 44 45 46 47
+cross 42 19 35 36 37 45 49 50 51
+cross 43 16 19 25 33 34 35 36 37 38
+cross 44 23 37 40 41 47 50 52
+cross 45 19 23 28 35 36 37 40 41 42
+cross 46 27 41 53
+cross 47 23 27 30 37 40 41 44
+cross 48 32 38 51
+cross 49 34 38 42 51 52
+cross 50 36 42 44 51 52 53
+cross 51 34 36 42 48 49 50
+cross 52 36 40 44 49 50
+cross 53 40 46 50
+levels 81
+level 0 cell 1
+level 1 cell 2
+level 2 cell 3
+level 3 cell 4
+level 4 cell 6
+level 5 link 6
+level 6 cell 7
+level 7 link 10
+level 8 cell 8
+level 9 link 13
+level 10 cell 9
+level 11 link 1
+level 12 cell 10
+level 13 link 4
+level 14 cell 11
+level 15 link 8
+level 16 cell 12
+level 17 link 2
+level 18 link 22
+level 19 cell 13
+level 20 link 5
+level 21 link 26
+level 22 cell 14
+level 23 link 0
+level 24 link 9
+level 25 link 15
+level 26 link 29
+level 27 cell 15
+level 28 link 3
+level 29 link 12
+level 30 link 17
+level 31 link 31
+level 32 cell 16
+level 33 link 7
+level 34 link 20
+level 35 cell 17
+level 36 link 11
+level 37 link 24
+level 38 cell 18
+level 39 link 18
+level 40 link 39
+level 41 cell 19
+level 42 link 14
+level 43 link 21
+level 44 link 43
+level 45 cell 20
+level 46 link 16
+level 47 link 25
+level 48 link 33
+level 49 link 45
+level 50 cell 21
+level 51 link 19
+level 52 link 28
+level 53 link 35
+level 54 link 47
+level 55 cell 22
+level 56 link 23
+level 57 link 30
+level 58 link 37
+level 59 cell 23
+level 60 link 27
+level 61 link 41
+level 62 cell 25
+level 63 link 32
+level 64 link 38
+level 65 link 51
+level 66 cell 26
+level 67 link 34
+level 68 link 42
+level 69 link 48
+level 70 link 52
+level 71 cell 27
+level 72 link 36
+level 73 link 44
+level 74 link 49
+level 75 link 53
+level 76 cell 28
+level 77 link 40
+level 78 link 46
+level 79 link 50
+level 80 turn
