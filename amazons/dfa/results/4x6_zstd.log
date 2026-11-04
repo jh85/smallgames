@@ -1,0 +1,9 @@
+dense_4x6/W4.bits block=16777216 level=3 raw=2986529040 compressed=1369208462 ratio=2.18 secs=0.5
+dense_4x6/W5.bits block=16777216 level=3 raw=7105879440 compressed=2232753707 ratio=3.18 secs=0.9
+dense_4x6/W6.bits block=16777216 level=3 raw=12975953760 compressed=5681022890 ratio=2.28 secs=2.0
+dense_4x6/W7.bits block=16777216 level=3 raw=18434093040 compressed=5854376841 ratio=3.15 secs=2.3
+dense_4x6/W8.bits block=16777216 level=3 raw=20802719520 compressed=7983035489 ratio=2.61 secs=3.0
+dense_4x6/W9.bits block=16777216 level=3 raw=18434093040 compressed=5179983209 ratio=3.56 secs=2.2
+dense_4x6/W10.bits block=16777216 level=3 raw=12975953760 compressed=4074459670 ratio=3.18 secs=1.7
+dense_4x6/W11.bits block=16777216 level=3 raw=7105879440 compressed=1531038149 ratio=4.64 secs=0.8
+dense_4x6/W12.bits block=16777216 level=3 raw=2986529040 compressed=649326820 ratio=4.60 secs=0.3

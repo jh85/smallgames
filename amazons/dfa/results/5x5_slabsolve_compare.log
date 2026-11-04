@@ -1,0 +1,79 @@
+# 5x5 q=4 cells=25 free=17 group=8 rows=1666 slabs/row=5985 words/slab=256 classes=8 level=3 order=rev
+# raw table 152.9 GiB in total, peak layer 28.2 GiB, per class 3.5 GiB
+# root /data1/amazons/work/slab_5x5: 1900 GiB free
+# kernel: 2 workers, 16 threads each; aux 64 threads; row buffers 0.5 GiB per worker
+#  k              |P_k|              |W_k|              |L_k|      bytes   ratio   gather    shots  parents  in_wait out_wait     secs
+#   k=17: all 9469965 positions of /data1/amazons/work/dense_5x5/W17.bits identical
+  17           75710250                  0           75710250       8957 8905.67      0.0      0.0      0.0      0.0      0.0      0.2
+#   k=16: all 160989405 positions of /data1/amazons/work/dense_5x5/W16.bits identical
+  16         1287074250          866373210          420701040    8784122    9.08      0.6      0.5      0.8      0.0      0.0      2.1
+#   k=16: 623188 positions relabelled in memory, no mismatch
+#   layer 17 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=15: all 1287915240 positions of /data1/amazons/work/dense_5x5/W15.bits identical
+  15        10296594000         4441965964         5854628036   34859348    6.86      0.7      1.2      1.8      0.0      0.0      4.6
+#   k=15: 623192 positions relabelled in memory, no mismatch
+#   layer 16 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=14: all 6439576200 positions of /data1/amazons/work/dense_5x5/W14.bits identical
+  14        51482970000        35422400214        16060569786  149777987    5.86      0.8      2.4      5.3      0.0      0.0     12.0
+#   k=14: 623192 positions relabelled in memory, no mismatch
+#   layer 15 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=13: all 22538516700 positions of /data1/amazons/work/dense_5x5/W13.bits identical
+  13       180190395000       101710386387        78480008613  718682524    4.22      1.0      2.9      7.3      0.0      0.0     22.2
+#   k=13: 623188 positions relabelled in memory, no mismatch
+#   layer 14 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=12: all 58600143420 positions of /data1/amazons/work/dense_5x5/W12.bits identical
+  12       468495027000       343888773006       124606253994 1867269533    4.14      1.5      3.4      9.5      0.0      0.0     38.9
+#   k=12: 623188 positions relabelled in memory, no mismatch
+#   layer 13 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=11: all 117200286840 positions of /data1/amazons/work/dense_5x5/W11.bits identical
+  11       936990054000       582828401318       354161652682 5045236531    3.07      2.4      3.5     10.6      0.1      5.0     65.6
+#   k=11: 623188 positions relabelled in memory, no mismatch
+#   layer 12 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=10: all 184171879320 positions of /data1/amazons/work/dense_5x5/W10.bits identical
+  10      1472412942000      1130075410302       342337531698 7203964647    3.37      3.1      3.8     11.9      0.2      8.8     93.1
+#   k=10: 623184 positions relabelled in memory, no mismatch
+#   layer 11 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=9: all 230214849150 positions of /data1/amazons/work/dense_5x5/W9.bits identical
+   9      1840516177500      1207104364003       633411813497 11892342834    2.55      4.1      4.8     12.5      0.3     14.2    116.3
+#   k=9: 623188 positions relabelled in memory, no mismatch
+#   layer 10 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=8: all 230214849150 positions of /data1/amazons/work/dense_5x5/W8.bits identical
+   8      1840516177500      1465709973532       374806203968 9994567303    3.03      4.2      4.7     12.8      0.6     13.9    117.5
+#   k=8: 623188 positions relabelled in memory, no mismatch
+#   layer 9 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=7: all 184171879320 positions of /data1/amazons/work/dense_5x5/W7.bits identical
+   7      1472412942000       998977221590       473435720410 10508268701    2.31      3.8      4.4     12.0      0.5     12.2     93.1
+#   k=7: 623188 positions relabelled in memory, no mismatch
+#   layer 8 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=6: all 117200286840 positions of /data1/amazons/work/dense_5x5/W6.bits identical
+   6       936990054000       773225874032       163764179968 5207460058    2.97      4.0      4.6     11.6      0.4      6.0     62.4
+#   k=6: 623188 positions relabelled in memory, no mismatch
+#   layer 7 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=5: all 58600143420 positions of /data1/amazons/work/dense_5x5/W5.bits identical
+   5       468495027000       324566744004       143928282996 3512228860    2.20      2.9      4.4     12.4      0.3      2.1     46.0
+#   k=5: 623192 positions relabelled in memory, no mismatch
+#   layer 6 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=4: all 22538516700 positions of /data1/amazons/work/dense_5x5/W4.bits identical
+   4       180190395000       154467522074        25722872926  963271738    3.15      2.2      4.0     10.4      0.2      0.0     27.8
+#   k=4: 623188 positions relabelled in memory, no mismatch
+#   layer 5 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=3: all 6439576200 positions of /data1/amazons/work/dense_5x5/W3.bits identical
+   3        51482970000        35814519898        15668450102  405625810    2.16      1.1      2.7      7.3      0.1      0.0     18.1
+#   k=3: 623188 positions relabelled in memory, no mismatch
+#   layer 4 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=2: all 1287915240 positions of /data1/amazons/work/dense_5x5/W2.bits identical
+   2        10296594000         9228187260         1068406740   50692740    4.72      1.0      1.2      3.0      0.0      0.0      8.1
+#   k=2: 623188 positions relabelled in memory, no mismatch
+#   layer 3 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=1: all 160989405 positions of /data1/amazons/work/dense_5x5/W1.bits identical
+   1         1287074250          862673349          424400901   13654390    5.84      0.7      0.5      1.1      0.0      0.0      3.3
+#   k=1: 623184 positions relabelled in memory, no mismatch
+#   layer 2 moved to /data1/amazons/work/slab_5x5 in 0s
+#   k=0: all 9469965 positions of /data1/amazons/work/dense_5x5/W0.bits identical
+   0           75710250           71793224            3917026     581157  137.26      0.6      0.2      0.6      0.0      0.0      1.7
+#   k=0: 623188 positions relabelled in memory, no mismatch
+# root 5x5: first player wins
+#   layer 1 moved to /data1/amazons/work/slab_5x5 in 0s
+# totals: win=7169262583367 loss=2754231304633 compressed=53.62 GiB
+# io: read 53.62 GiB, written 53.62 GiB; compress 197s, write 23s, read+decompress 43s
+# done 732.7s

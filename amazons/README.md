@@ -35,6 +35,7 @@ test/                  unit + cross-validation tests (ctest)
 tools/layercount.cc    exact per-layer reachable-position counts (RAM feasibility probe)
 tools/wdlretro.cc      external-memory WDL table builder (see "5x5" section)
 tools/wdlcheck.cc      exhaustive per-position consistency checker for wdlretro tables
+dfa/                   our own DFA solver and 1-bit full-envelope tables; see dfa/README.md and dfa/PLAN.md
 ```
 
 Design notes:
@@ -94,7 +95,37 @@ DB, pn-init, move ordering on).  "nodes" = SearchImpl invocations.
 | 4x4   | 2nd player win  | 2nd player win ✓ (83,638 nodes, 1.0s) | 2nd player win ✓ (exact) |
 | 4x5   | 1st player win  | unproven within 2h / 1.0e9 nodes | **2nd player win** (exact) — conflicts with the paper, see below |
 | 5x4   | 1st player win  | unproven within 2e9 nodes | 1st player win ✓ (exact); the only losing reply of the 85 first moves is unique (layer 1: 84 W / 1 L) |
-| 5x5   | 1st player win  | unproven within 1h / 2.2e8 nodes | infeasible on this machine (see below) |
+| 5x5   | 1st player win  | unproven within 1h / 2.2e8 nodes | 1st player win ✓ (exact, every placement, by `dfa/dense`) |
+| 4x6, 6x4 | 1st, 2nd player win | not attempted | 1st, 2nd player win ✓ (exact, one table, by `dfa/dense`) |
+| 4x7, 7x4 | 1st player win (4x7) | not attempted | 1st, 2nd player win ✓ (exact, one table, by `dfa/slabsolve`) |
+| 5x6, 6x5 | 1st player win (5x6) | not attempted | 1st, 1st player win ✓ (exact, one table, by `dfa/slabsolve`) |
+
+### Strong solutions with `dfa/slabsolve`
+
+Each table holds the value of **every** placement of 4+4 queens with any set of arrows, so
+it covers both orientations of the board and any starting setup. Counts below are raw
+positions, not reduced by symmetry; the stored tables are about 4 times smaller in
+classes. Reachable-from-start counts were not measured for these boards (on 5x5 about half
+of the central layers is reachable, so restricting to them would not help).
+
+| board | result | winning first moves | positions in table | wins | losses | compute | kept on disk |
+|-------|--------|--------------------:|-------------------:|-----:|-------:|--------:|-------------:|
+| 4x4 | 2nd player win | 0 of 88 | 230,630,400 | 154,827,660 | 75,802,740 | seconds | |
+| 4x5 | 2nd player win | 0 of 170 | 36,118,118,400 | 25,626,518,984 | 10,491,599,416 | seconds | |
+| 5x4 | 1st player win | 2 of 170 | (same table) | | | | |
+| 4x6 | 1st player win | 14 of 256 | 3,373,987,921,920 | 2,417,950,646,547 | 956,037,275,373 | 3.7 min | 33 GiB |
+| 6x4 | 2nd player win | 0 of 256 | (same table) | | | | |
+| 5x5 | 1st player win | 84 of 260 | 9,923,493,888,000 | 7,169,262,583,367 | 2,754,231,304,633 | 5.0 min | 56 GiB |
+| 4x7 | 1st player win | 22 of 350 | 228,135,901,593,600 | 162,376,663,387,286 | 65,759,238,206,314 | 2.9 h | 0.9 TiB (half the layers) |
+| 7x4 | **2nd player win** (new) | 0 of 350 | (same table) | | | | |
+| 5x6 | 1st player win | 10 of 410 | 1,718,426,271,744,000 | 1,235,350,596,940,923 | 483,075,674,803,077 | 35.4 h | 6.5 TiB (half the layers) |
+| 6x5 | **1st player win** (new) | 8 of 410 | (same table) | | | | |
+
+First moves are counted without symmetry reduction, as in Song and Müller (who count 157
+replies to 5x6's B1-B4xD4; the table finds the same 157, all losing). Every run relabels a
+sample of every layer from the rules, and 4x7 and 5x6 were also checked by 200 games of
+`slabsolve playout` from both orientations. How the solver works, and the numbers behind
+these, are in [dfa/README.md](dfa/README.md) and [dfa/PLAN.md](dfa/PLAN.md).
 
 **The 4x5 verdict contradicts Table I of the paper** (which lists 4 5 as a
 first-player win).  The exhaustive table says the second player wins, and
@@ -192,6 +223,11 @@ the eval fix (see "Errata"); only 4x4's contains its root verdict.
 
 ## 5x5: feasibility and the external-memory WDL builder
 
+**Superseded for 5x5.** `dfa/dense` stores one bit per position over every
+placement and solves 5x5 in 55 minutes in about 60 GB of RAM, so the estimate below
+of weeks on a disk-based builder no longer applies. `wdlretro` remains useful as an
+independent method. See [dfa/PLAN.md](dfa/PLAN.md).
+
 `tools/layercount.cc` measures the exact number of distinct canonical
 positions per layer (layer k = k burned squares) reachable from the standard
 5x5 start, by parallel BFS with hash dedup.  Measured on this machine
@@ -203,7 +239,7 @@ positions per layer (layer k = k burned squares) reachable from the standard
 | 1 | 130 |
 | 2 | 22,872 |
 | 3 | 1,614,937 |
-| 4 | 77,756,261 |
+| 4 | 77,756,246 |
 | 5 | 1,409,771,529 |
 | 6 | > ~5e9 (exceeded a 105 GiB address-space cap mid-expansion) |
 
@@ -245,7 +281,7 @@ by the independent `wdlcheck` checker (`tools/wdlcheck.cc`).  The built 4x5 and 
 
 The paper's full evaluation machinery (combinatorial-game values of local
 areas, blocker-territory databases, thermographs, subzero thermography) is
-what let it solve 5x6/6x4; it is out of scope here.  Without it, 5x5 and
-larger are attempted under node/time limits and reported honestly as
-unknown when unproven.  The ZDD is used as a verdict database only (no
+what let it solve 5x6/6x4; it is out of scope here.  Without it, the search
+solver cannot prove 5x5 and larger; those boards are solved exhaustively by
+`dfa/` instead (see "Strong solutions with `dfa/slabsolve`").  The ZDD is used as a verdict database only (no
 symbolic retrograde engine).

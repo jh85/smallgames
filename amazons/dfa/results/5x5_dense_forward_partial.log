@@ -1,0 +1,11 @@
+# slabs: 75710250 raw, 9469965 canonical (0.2s)
+# 5x5 q=4 cells=25 free=17 group=8 threads=52: full table 145.2 GiB per set
+# forward pass
+#  R k=0 raw=4 classes=1 (0.0s)
+#  R k=1 raw=1040 classes=130 (0.0s)
+#  R k=2 raw=182976 classes=22872 (0.1s)
+#  R k=3 raw=12919496 classes=1614937 (0.2s)
+#  R k=4 raw=622031180 classes=77756246 (3.3s)
+#  R k=5 raw=11278070174 classes=1409771529 (38.7s)
+#  R k=6 raw=137093096008 classes=17136682309 (381.0s)
+#  R k=7 raw=589606415836 classes=73700974457 (1545.6s)

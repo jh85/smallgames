@@ -1,0 +1,7 @@
+layercount 5x5: 64 threads, RAM budget 40 GB
+layer  0:            1 positions (cumulative 1, rss 0.0 GB, 0s)
+layer  1:          130 positions (cumulative 131, rss 0.0 GB, 0s)
+layer  2:        22872 positions (cumulative 23003, rss 0.1 GB, 0s)
+layer  3:      1614937 positions (cumulative 1637940, rss 0.2 GB, 1s)
+layer  4:     77756246 positions (cumulative 79394186, rss 0.8 GB, 25s)
+layer  5:   1409771529 positions (cumulative 1489165715, rss 11.4 GB, 562s)

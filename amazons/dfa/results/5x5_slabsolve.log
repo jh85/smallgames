@@ -1,0 +1,63 @@
+# 5x5 q=4 cells=25 free=17 group=8 rows=1666 slabs/row=5985 words/slab=256 classes=1 level=3 canon=min
+# raw table 152.9 GiB in total, peak layer 28.2 GiB, per class 28.2 GiB
+# root /data1/amazons/work/slab_5x5: 1900 GiB free
+# kernel: 2 workers, 16 threads each; aux 32 threads; row buffers 0.5 GiB per worker
+#  k              |P_k|              |W_k|              |L_k|      bytes   ratio   gather    shots  parents  in_wait out_wait     secs
+  17           75710250                  0           75710250       7413 10760.57      0.0      0.0      0.0      0.0      0.0      0.2
+  16         1287074250          866373210          420701040    5132536   15.54      0.6      0.5      0.8      0.0      0.0      2.1
+#   k=16: 623188 positions relabelled in memory, no mismatch
+#   layer 17 moved to /data1/amazons/work/slab_5x5 in 0s
+  15        10296594000         4441965964         5854628036   27815311    8.60      0.7      1.2      1.8      0.0      0.0      4.3
+#   k=15: 623192 positions relabelled in memory, no mismatch
+#   layer 16 moved to /data1/amazons/work/slab_5x5 in 0s
+  14        51482970000        35422400214        16060569786  139971844    6.27      0.8      2.4      5.2      0.0      0.0      9.9
+#   k=14: 623192 positions relabelled in memory, no mismatch
+#   layer 15 moved to /data1/amazons/work/slab_5x5 in 0s
+  13       180190395000       101710386387        78480008613  650395904    4.66      0.9      2.7      6.9      0.1      0.0     13.5
+#   k=13: 623188 positions relabelled in memory, no mismatch
+#   layer 14 moved to /data1/amazons/work/slab_5x5 in 0s
+  12       468495027000       343888773006       124606253994 1825075054    4.24      1.2      2.9      8.7      0.3      0.0     17.5
+#   k=12: 623188 positions relabelled in memory, no mismatch
+#   layer 13 moved to /data1/amazons/work/slab_5x5 in 0s
+  11       936990054000       582828401318       354161652682 5222622965    2.96      1.4      2.7      9.0      0.7      0.0     21.3
+#   k=11: 623188 positions relabelled in memory, no mismatch
+#   layer 12 moved to /data1/amazons/work/slab_5x5 in 0s
+  10      1472412942000      1130075410302       342337531698 7701089570    3.15      1.7      2.7      9.8      1.9      0.0     25.6
+#   k=10: 623184 positions relabelled in memory, no mismatch
+#   layer 11 moved to /data1/amazons/work/slab_5x5 in 0s
+   9      1840516177500      1207104364003       633411813497 12586428623    2.41      2.3      3.1     11.2      2.8      0.0     32.8
+#   k=9: 623188 positions relabelled in memory, no mismatch
+#   layer 10 moved to /data1/amazons/work/slab_5x5 in 0s
+   8      1840516177500      1465709973532       374806203968 10404055382    2.91      2.4      3.2     11.2      4.2      0.0     32.8
+#   k=8: 623188 positions relabelled in memory, no mismatch
+#   layer 9 moved to /data1/amazons/work/slab_5x5 in 0s
+   7      1472412942000       998977221590       473435720410 10798136123    2.25      2.5      3.1     10.7      3.7      0.0     32.9
+#   k=7: 623188 positions relabelled in memory, no mismatch
+#   layer 8 moved to /data1/amazons/work/slab_5x5 in 0s
+   6       936990054000       773225874032       163764179968 5291618945    2.92      2.5      3.2     10.2      3.5      0.0     28.1
+#   k=6: 623188 positions relabelled in memory, no mismatch
+#   layer 7 moved to /data1/amazons/work/slab_5x5 in 0s
+   5       468495027000       324566744004       143928282996 3537951211    2.19      2.2      3.6     10.5      1.8      0.0     26.5
+#   k=5: 623192 positions relabelled in memory, no mismatch
+#   layer 6 moved to /data1/amazons/work/slab_5x5 in 0s
+   4       180190395000       154467522074        25722872926  963570752    3.15      1.4      2.7      8.3      1.2      0.0     18.8
+#   k=4: 623188 positions relabelled in memory, no mismatch
+#   layer 5 moved to /data1/amazons/work/slab_5x5 in 0s
+   3        51482970000        35814519898        15668450102  401623217    2.18      1.1      2.5      7.1      0.3      0.0     17.1
+#   k=3: 623188 positions relabelled in memory, no mismatch
+#   layer 4 moved to /data1/amazons/work/slab_5x5 in 0s
+   2        10296594000         9228187260         1068406740   50616083    4.73      0.9      1.1      2.9      0.1      0.0      8.4
+#   k=2: 623188 positions relabelled in memory, no mismatch
+#   layer 3 moved to /data1/amazons/work/slab_5x5 in 0s
+   1         1287074250          862673349          424400901   13514843    5.90      0.7      0.5      1.1      0.0      0.0      4.9
+#   k=1: 623184 positions relabelled in memory, no mismatch
+#   layer 2 moved to /data1/amazons/work/slab_5x5 in 0s
+   0           75710250           71793224            3917026     646345  123.41      0.6      0.2      0.5      0.0      0.0      1.7
+#   k=0: 623188 positions relabelled in memory, no mismatch
+# root 5x5: first player wins
+#   layer 1 moved to /data1/amazons/work/slab_5x5 in 0s
+# totals: win=7169262583367 loss=2754231304633 compressed=55.53 GiB
+# io: read 55.53 GiB, written 55.53 GiB; compress 24s, write 22s, read+decompress 21s
+# computed in 298.6s
+#   layer 0 moved to /data1/amazons/work/slab_5x5 in 0s
+# done 298.6s

@@ -1,0 +1,51 @@
+# slabs: 8817900 raw, 2205812 canonical (0.0s)
+# 4x5 q=4 cells=20 free=12 group=4 threads=48: full table 1.2 GiB per set
+# forward pass
+#  R k=0 raw=2 classes=1 (0.0s)
+#  R k=1 raw=340 classes=85 (0.0s)
+#  R k=2 raw=34084 classes=8521 (0.0s)
+#  R k=3 raw=1295380 classes=323845 (0.0s)
+#  R k=4 raw=31929422 classes=7982995 (0.2s)
+#  R k=5 raw=284613856 classes=71153464 (0.8s)
+#  R k=6 raw=1665405696 classes=416352718 (3.4s)
+#  R k=7 raw=3613182660 classes=903295665 (5.3s)
+#  R k=8 raw=4168012158 classes=1042022650 (4.3s)
+#  R k=9 raw=1936998956 classes=484256863 (1.8s)
+#  R k=10 raw=581978754 classes=145503120 (0.5s)
+#  R k=11 raw=105814772 classes=26455121 (0.2s)
+#  R k=12 raw=8817898 classes=2205811 (0.0s)
+#  k              |P_k|              |W_k|              |L_k|         probes     secs  total_s
+  12            8817900                  0            8817900              0      0.0     16.7
+#  reach k=12 raw=8817898 win=0 loss=8817898 classes=2205811 win_classes=0 frac_of_P=1.0000
+  11          105814800           79511250           26303550       19890203      0.2     16.9
+#  reach k=11 raw=105814772 win=79511238 loss=26303534 classes=26455121 win_classes=19878762 frac_of_P=1.0000
+  10          581981400          228769616          353211784      331154483      0.4     17.3
+#  reach k=10 raw=581978754 win=228768152 loss=353210602 classes=145503120 win_classes=57194101 frac_of_P=1.0000
+   9         1939938000         1477603348          462334652      923121506      0.8     18.1
+#  reach k=9 raw=1936998956 win=1475373360 loss=461625596 classes=484256863 win_classes=368848418 frac_of_P=0.9985
+   8         4364860500         2387304560         1977555940     6300708328      2.5     20.6
+#  reach k=8 raw=4168012158 win=2266720367 loss=1901291791 classes=1042022650 win_classes=566686683 frac_of_P=0.9549
+   7         6983776800         5661657068         1322119732     7767483335      3.2     23.8
+#  reach k=7 raw=3613182660 win=2889015280 loss=724167380 classes=903295665 win_classes=722253820 frac_of_P=0.5174
+   6         8147739600         4916942151         3230797449    24376447695      6.7     30.5
+#  reach k=6 raw=1665405696 win=991868530 loss=673537166 classes=416352718 win_classes=247967744 frac_of_P=0.2044
+   5         6983776800         5935779202         1047997598    14054187600      4.3     34.9
+#  reach k=5 raw=284613856 win=229379596 loss=55234260 classes=71153464 win_classes=57344899 frac_of_P=0.0408
+   4         4364860500         2744061624         1620798876    23648018369      5.0     39.9
+#  reach k=4 raw=31929422 win=20831218 loss=11098204 classes=7982995 win_classes=5208105 frac_of_P=0.0073
+   3         1939938000         1728761332          211176668     5752841099      1.5     41.4
+#  reach k=3 raw=1295380 win=1093068 loss=202312 classes=323845 win_classes=273267 frac_of_P=0.0007
+   2          581981400          361928304          220053096     5418020114      1.1     42.6
+#  reach k=2 raw=34084 win=25344 loss=8740 classes=8521 win_classes=6336 frac_of_P=0.0001
+   1          105814800           99639542            6175258      355700018      0.2     42.8
+#  reach k=1 raw=340 win=340 loss=0 classes=85 win_classes=85 frac_of_P=0.0000
+   0            8817900            4560987            4256913      151837164      0.2     43.0
+#  reach k=0 raw=2 win=0 loss=2 classes=1 win_classes=0 frac_of_P=0.0000
+# root: second player wins
+# totals: win=25626518984 loss=10491599416
+# reachable totals: win=8182586493 loss=4215497485
+# done 43.0s
+
+real	0m43.002s
+user	31m53.115s
+sys	0m6.101s

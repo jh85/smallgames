@@ -1,0 +1,8 @@
+# board 6x6 q=4 order=row threads=6 cells=36 layers=0..28
+# relation: 9412 moves, 4517 automaton states (widest level 203), built in 0.01s
+#  k             |P_k|             |W_k|             |L_k|      nodes(W)      nodes(L)    width(L)       subsets pairs/s maxpair expand_s replay_s  total_s  rssGiB
+R k=0 raw=1 share_of_P=0.000000 nodes=36 width=1 next_subsets=2515 rss=0.0 0.1s
+R k=1 raw=544 share_of_P=0.000000 nodes=959 width=51 next_subsets=64526 rss=0.0 0.2s
+R k=2 raw=222850 share_of_P=0.000000 nodes=32997 width=2276 next_subsets=11979675 rss=0.4 1.9s
+R k=3 raw=39628888 share_of_P=0.000006 nodes=1795223 width=162594 next_subsets=513551862 rss=14.2 1798.0s
+MEMORY LIMIT: rss 129.3 GiB > limit 120.0 GiB, stopping

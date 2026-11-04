@@ -37,6 +37,36 @@ target_link_libraries(wdlretro PRIVATE amazons_core pthread)
 add_executable(wdlcheck tools/wdlcheck.cc)
 target_link_libraries(wdlcheck PRIVATE amazons_core)
 
+# ---- Symbolic (DFA) solver and dense full-envelope tables ----
+# Deliberately independent of amazons_core, so they can check it.
+add_executable(amzdfa dfa/amzdfa.cc)
+target_link_libraries(amzdfa PRIVATE pthread)
+add_executable(dense dfa/dense.cc)
+target_link_libraries(dense PRIVATE pthread)
+find_library(ZSTD_LIBRARY zstd)
+if(ZSTD_LIBRARY)
+  add_executable(blockzstd dfa/blockzstd.cc)
+  target_link_libraries(blockzstd PRIVATE ${ZSTD_LIBRARY} pthread)
+endif()
+
+# The bit-parallel solver needs AVX-512 with VBMI and GFNI, and libzstd.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-march=native")
+check_cxx_source_compiles("
+#include <immintrin.h>
+int main() {
+  __m512i a = _mm512_setzero_si512();
+  a = _mm512_permutexvar_epi8(a, a);
+  a = _mm512_gf2p8affine_epi64_epi8(a, a, 0);
+  return _mm512_test_epi64_mask(a, a) != 0;
+}" AMAZONS_HAVE_AVX512_VBMI_GFNI)
+unset(CMAKE_REQUIRED_FLAGS)
+if(ZSTD_LIBRARY AND AMAZONS_HAVE_AVX512_VBMI_GFNI)
+  add_executable(slabsolve dfa/slabsolve.cc)
+  target_compile_options(slabsolve PRIVATE -march=native)
+  target_link_libraries(slabsolve PRIVATE ${ZSTD_LIBRARY} pthread)
+endif()
+
 # ---- Tests ----
 enable_testing()
 foreach(t IN ITEMS test_board test_arith test_zdd test_solver)
@@ -44,3 +74,17 @@ foreach(t IN ITEMS test_board test_arith test_zdd test_solver)
   target_link_libraries(${t} PRIVATE amazons_core)
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  if(TARGET slabsolve)
+    add_test(NAME dfa_crosscheck
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/dfa/crosscheck.py
+                     $<TARGET_FILE:amzdfa> $<TARGET_FILE:dense> $<TARGET_FILE:slabsolve>)
+    add_test(NAME slabsolve_selftest COMMAND slabsolve selftest)
+  else()
+    add_test(NAME dfa_crosscheck
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/dfa/crosscheck.py
+                     $<TARGET_FILE:amzdfa> $<TARGET_FILE:dense>)
+  endif()
+endif()

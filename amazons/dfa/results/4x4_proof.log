@@ -1,0 +1,13 @@
+# slabs: 900900 raw, 113028 canonical (0.0s)
+# proof from the standard start, static bounds off
+#  k              raw          classes           of_P
+   0                4                1      4.440e-06
+   1              352               44      4.884e-05
+   2              304               38      1.205e-05
+   3             4056              507      8.040e-05
+   4             3544              445      5.620e-05
+   5            13924             1741      2.760e-04
+   6            12832             1607      5.087e-04
+   7            11232             1405      1.558e-03
+   8            10388             1301      1.153e-02
+# proof total: raw=56636 classes=7089 static_leaves=0 (0.1s)

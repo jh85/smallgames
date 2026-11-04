@@ -1,0 +1,206 @@
+# command: slabsolve solve 4x7 --root /data1/amazons/work/slab_4x7 --root /mnt/amazons/slab_4x7 --keep parity --reserve 100 --verify-samples 1000
+# 4x7 q=4 cells=28 free=20 group=4 rows=5199 slabs/row=10626 words/slab=2048 classes=38 level=3 canon=min
+# raw table 6748.3 GiB in total, peak layer 1188.3 GiB, per class 31.3 GiB
+# root /data1/amazons/work/slab_4x7: 1845 GiB free
+# root /mnt/amazons/slab_4x7: 7374 GiB free
+# kernel: 2 workers, 16 threads each; aux 32 threads; row buffers 6.5 GiB per worker
+#  k              |P_k|              |W_k|              |L_k|      bytes   ratio   gather    shots  parents  in_wait out_wait     secs
+  20          217567350                  0          217567350      77315 5716.31      0.0      0.0      0.0      0.0      0.3      0.3
+  19         4351347000         2724913730         1626433270   29794535   14.83      4.3      3.8      6.8      0.0      0.0     15.0
+#   k=19: 3452784 positions relabelled in memory, no mismatch
+  18        41337796500        18348551228        22989245272  233765247    5.67      5.0     11.8     19.0      0.0      0.0     36.1
+#   k=18: 3452788 positions relabelled in memory, no mismatch
+#   layer 19 moved to /mnt/amazons/slab_4x7 in 1s
+#   k=17: class 24/38, 62s in layer, about 36s left
+  17       248026779000       161088605128        86938173872 1196694998    6.65      6.4     30.7     61.2      0.0      0.0     99.3
+#   k=17: 3452784 positions relabelled in memory, no mismatch
+#   k=16: class 8/38, 70s in layer, about 261s left
+#   k=16: class 15/38, 134s in layer, about 205s left
+#   k=16: class 23/38, 201s in layer, about 131s left
+#   k=16: class 29/38, 275s in layer, about 85s left
+#   k=16: class 34/38, 337s in layer, about 40s left
+  16      1054113810750       595801162698       458312648052 5594469828    6.00     20.2    108.2    241.7      0.0      0.0    373.7
+#   k=16: 3452788 positions relabelled in memory, no mismatch
+#   layer 17 moved to /mnt/amazons/slab_4x7 in 14s
+#   k=15: class 6/38, 70s in layer, about 371s left
+#   k=15: class 12/38, 138s in layer, about 300s left
+#   k=15: class 18/38, 207s in layer, about 231s left
+#   k=15: class 24/38, 279s in layer, about 163s left
+#   k=15: class 30/38, 351s in layer, about 94s left
+#   k=15: class 35/38, 413s in layer, about 35s left
+  15      3373164194400      2341090242210      1032073952190 18937662966    5.67     17.7    123.3    307.8      0.0      0.0    453.2
+#   k=15: 3452788 positions relabelled in memory, no mismatch
+#   k=14: class 4/38, 61s in layer, about 516s left
+#   k=14: class 9/38, 134s in layer, about 433s left
+#   k=14: class 14/38, 208s in layer, about 356s left
+#   k=14: class 18/38, 269s in layer, about 299s left
+#   k=14: class 22/38, 332s in layer, about 241s left
+#   k=14: class 26/38, 394s in layer, about 182s left
+#   k=14: class 30/38, 457s in layer, about 122s left
+#   k=14: class 34/38, 522s in layer, about 61s left
+#   k=14: class 38/38, 589s in layer, about 0s left
+  14      8432910486000      5224832994427      3208077491573 54576179205    4.91     28.1    149.7    408.6      0.1      0.0    592.5
+#   k=14: 3452784 positions relabelled in memory, no mismatch
+#   k=13: class 3/38, 69s in layer, about 809s left
+#   k=13: class 7/38, 144s in layer, about 640s left
+#   layer 15 moved to /mnt/amazons/slab_4x7 in 201s
+#   k=13: class 11/38, 220s in layer, about 541s left
+#   k=13: class 15/38, 295s in layer, about 453s left
+#   k=13: class 19/38, 373s in layer, about 373s left
+#   k=13: class 23/38, 452s in layer, about 295s left
+#   k=13: class 26/38, 514s in layer, about 237s left
+#   k=13: class 29/38, 575s in layer, about 178s left
+#   k=13: class 32/38, 638s in layer, about 120s left
+#   k=13: class 35/38, 700s in layer, about 60s left
+#   k=13: class 38/38, 763s in layer, about 0s left
+  13     16865820972000     12212490449374      4653330522626 107120361331    5.00     67.3    183.0    510.8      0.2      0.0    768.8
+#   k=13: 3452784 positions relabelled in memory, no mismatch
+#   k=12: class 2/38, 67s in layer, about 1214s left
+#   k=12: class 6/38, 145s in layer, about 775s left
+#   k=12: class 9/38, 208s in layer, about 670s left
+#   k=12: class 12/38, 272s in layer, about 590s left
+#   k=12: class 15/38, 340s in layer, about 521s left
+#   k=12: class 18/38, 409s in layer, about 455s left
+#   k=12: class 21/38, 480s in layer, about 389s left
+#   k=12: class 24/38, 555s in layer, about 324s left
+#   k=12: class 27/38, 629s in layer, about 256s left
+#   k=12: class 30/38, 704s in layer, about 188s left
+#   k=12: class 33/38, 776s in layer, about 118s left
+#   k=12: class 36/38, 853s in layer, about 47s left
+  12     27406959079500     17807620182219      9599338897281 201917248931    4.31     96.2    212.6    591.2      0.5      0.0    912.2
+#   k=12: 3452788 positions relabelled in memory, no mismatch
+#   k=11: class 2/38, 60s in layer, about 1088s left
+#   k=11: class 5/38, 130s in layer, about 855s left
+#   k=11: class 8/38, 202s in layer, about 758s left
+#   k=11: class 11/38, 279s in layer, about 685s left
+#   k=11: class 14/38, 359s in layer, about 615s left
+#   k=11: class 17/38, 441s in layer, about 544s left
+#   k=11: class 20/38, 523s in layer, about 470s left
+#   k=11: class 23/38, 608s in layer, about 396s left
+#   k=11: class 25/38, 668s in layer, about 348s left
+#   k=11: class 27/38, 731s in layer, about 298s left
+#   k=11: class 29/38, 793s in layer, about 246s left
+#   k=11: class 31/38, 857s in layer, about 193s left
+#   k=11: class 34/38, 937s in layer, about 110s left
+#   k=11: class 36/38, 998s in layer, about 55s left
+  11     36542612106000     27302636593026      9239975512974 296564632038    3.91    121.3    240.2    681.8      0.9      9.4   1068.1
+#   k=11: 3452788 positions relabelled in memory, no mismatch
+#   k=10: class 2/38, 73s in layer, about 1314s left
+#   layer 13 moved to /mnt/amazons/slab_4x7 in 1213s
+#   k=10: class 5/38, 146s in layer, about 962s left
+#   k=10: class 8/38, 225s in layer, about 842s left
+#   k=10: class 11/38, 308s in layer, about 756s left
+#   k=10: class 13/38, 368s in layer, about 708s left
+#   k=10: class 15/38, 430s in layer, about 660s left
+#   k=10: class 17/38, 494s in layer, about 610s left
+#   k=10: class 19/38, 557s in layer, about 557s left
+#   k=10: class 21/38, 622s in layer, about 503s left
+#   k=10: class 23/38, 688s in layer, about 449s left
+#   k=10: class 25/38, 756s in layer, about 393s left
+#   k=10: class 27/38, 825s in layer, about 336s left
+#   k=10: class 29/38, 895s in layer, about 278s left
+#   k=10: class 31/38, 968s in layer, about 218s left
+#   k=10: class 33/38, 1028s in layer, about 156s left
+#   k=10: class 35/38, 1096s in layer, about 94s left
+#   k=10: class 37/38, 1165s in layer, about 31s left
+  10     40196873316600     26915851131929     13281022184671 415324209704    3.07    136.6    255.0    746.4      1.6     55.8   1213.6
+#   k=10: 3452784 positions relabelled in memory, no mismatch
+#   k=9: class 2/38, 76s in layer, about 1371s left
+#   k=9: class 5/38, 147s in layer, about 967s left
+#   k=9: class 8/38, 220s in layer, about 824s left
+#   k=9: class 11/38, 298s in layer, about 730s left
+#   k=9: class 14/38, 380s in layer, about 651s left
+#   k=9: class 17/38, 467s in layer, about 577s left
+#   k=9: class 20/38, 554s in layer, about 499s left
+#   k=9: class 22/38, 614s in layer, about 447s left
+#   k=9: class 24/38, 678s in layer, about 396s left
+#   k=9: class 26/38, 740s in layer, about 341s left
+#   k=9: class 28/38, 806s in layer, about 288s left
+#   k=9: class 30/38, 875s in layer, about 233s left
+#   k=9: class 32/38, 938s in layer, about 176s left
+#   k=9: class 35/38, 1029s in layer, about 88s left
+#   k=9: class 37/38, 1090s in layer, about 29s left
+   9     36542612106000     28077085375072      8465526730928 324899157809    3.57    133.4    249.2    717.0      1.9     17.0   1134.9
+#   k=9: 3452788 positions relabelled in memory, no mismatch
+#   k=8: class 3/38, 77s in layer, about 900s left
+#   k=8: class 6/38, 144s in layer, about 768s left
+#   k=8: class 9/38, 216s in layer, about 695s left
+#   k=8: class 12/38, 290s in layer, about 628s left
+#   k=8: class 15/38, 368s in layer, about 564s left
+#   k=8: class 18/38, 449s in layer, about 498s left
+#   k=8: class 21/38, 529s in layer, about 429s left
+#   k=8: class 24/38, 613s in layer, about 358s left
+#   k=8: class 27/38, 695s in layer, about 283s left
+#   k=8: class 30/38, 780s in layer, about 208s left
+#   k=8: class 33/38, 862s in layer, about 131s left
+#   k=8: class 36/38, 948s in layer, about 53s left
+   8     27406959079500     18767404297543      8639554781957 288449315195    3.02    122.6    235.7    640.0      2.1      0.1   1016.0
+#   k=8: 3452784 positions relabelled in memory, no mismatch
+#   k=7: class 3/38, 68s in layer, about 793s left
+#   k=7: class 6/38, 130s in layer, about 692s left
+#   k=7: class 9/38, 196s in layer, about 631s left
+#   k=7: class 12/38, 262s in layer, about 567s left
+#   k=7: class 15/38, 329s in layer, about 505s left
+#   k=7: class 18/38, 401s in layer, about 446s left
+#   k=7: class 21/38, 471s in layer, about 382s left
+#   k=7: class 24/38, 545s in layer, about 318s left
+#   k=7: class 27/38, 616s in layer, about 251s left
+#   k=7: class 30/38, 692s in layer, about 184s left
+#   k=7: class 33/38, 765s in layer, about 116s left
+#   k=7: class 36/38, 840s in layer, about 47s left
+   7     16865820972000     13334517590540      3531303381460 156258180625    3.43     93.7    225.3    566.4      1.4      0.0    898.0
+#   k=7: 3452788 positions relabelled in memory, no mismatch
+#   k=6: class 4/38, 76s in layer, about 647s left
+#   k=6: class 8/38, 149s in layer, about 558s left
+#   k=6: class 12/38, 223s in layer, about 484s left
+#   k=6: class 16/38, 299s in layer, about 410s left
+#   k=6: class 20/38, 376s in layer, about 338s left
+#   layer 11 moved to /mnt/amazons/slab_4x7 in 3435s
+#   k=6: class 24/38, 456s in layer, about 266s left
+#   k=6: class 28/38, 533s in layer, about 190s left
+#   k=6: class 31/38, 595s in layer, about 134s left
+#   k=6: class 35/38, 675s in layer, about 58s left
+#   k=6: class 38/38, 736s in layer, about 0s left
+   6      8432910486000      5877315106348      2555595379652 98724522722    2.71     73.8    170.8    488.1      1.2      0.0    743.9
+#   k=6: 3452784 positions relabelled in memory, no mismatch
+#   k=5: class 4/38, 63s in layer, about 537s left
+#   k=5: class 9/38, 138s in layer, about 446s left
+#   k=5: class 14/38, 213s in layer, about 364s left
+#   k=5: class 18/38, 274s in layer, about 304s left
+#   k=5: class 22/38, 336s in layer, about 244s left
+#   k=5: class 26/38, 398s in layer, about 184s left
+#   k=5: class 30/38, 460s in layer, about 123s left
+#   k=5: class 34/38, 525s in layer, about 62s left
+#   k=5: class 38/38, 591s in layer, about 0s left
+   5      3373164194400      2752526202652       620637991748 31646322415    3.39     57.6    134.7    396.3      0.5      0.0    596.8
+#   k=5: 3452788 positions relabelled in memory, no mismatch
+#   k=4: class 6/38, 67s in layer, about 358s left
+#   k=4: class 12/38, 132s in layer, about 285s left
+#   k=4: class 18/38, 195s in layer, about 217s left
+#   k=4: class 24/38, 262s in layer, about 153s left
+#   k=4: class 30/38, 326s in layer, about 87s left
+#   k=4: class 36/38, 397s in layer, about 22s left
+   4      1054113810750       742424434195       311689376555 12930535859    2.60     20.3    106.9    290.6      0.2      0.0    424.9
+#   k=4: 3452784 positions relabelled in memory, no mismatch
+#   k=3: class 15/38, 62s in layer, about 95s left
+#   k=3: class 30/38, 123s in layer, about 33s left
+   3       248026779000       210017312632        38009466368 2249082963    3.54     14.2     35.4    108.4      0.1      0.0    161.6
+#   k=3: 3452788 positions relabelled in memory, no mismatch
+   2        41337796500        28891221758        12446574742  536294240    2.47      8.1     13.7     37.9      0.0      0.0     61.3
+#   k=2: 3452784 positions relabelled in memory, no mismatch
+   1         4351347000         3854754654          496592346   42747203   10.34      5.5      4.1     10.3      0.0      0.0     20.2
+#   k=1: 3452788 positions relabelled in memory, no mismatch
+   0          217567350          142265923           75301427    7150923   61.80      4.1      1.9      5.5      0.0      0.0     11.6
+#   k=0: 3452788 positions relabelled in memory, no mismatch
+# root 4x7: first player wins
+# root 7x4: second player wins
+# totals: win=162376663387286 loss=65759238206314 compressed=1878.70 GiB
+# io: read 1878.69 GiB, written 1878.70 GiB; compress 3753s, write 1845s, read+decompress 4429s
+# computed in 10605.1s
+#   layer 9 moved to /mnt/amazons/slab_4x7 in 3269s
+#   layer 7 moved to /mnt/amazons/slab_4x7 in 1443s
+#   layer 5 moved to /mnt/amazons/slab_4x7 in 294s
+#   layer 3 moved to /mnt/amazons/slab_4x7 in 23s
+#   layer 1 moved to /mnt/amazons/slab_4x7 in 0s
+#   layer 0 moved to /mnt/amazons/slab_4x7 in 0s
+# done 13997.3s

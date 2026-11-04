@@ -1,0 +1,62 @@
+# command: slabsolve solve 4x6 --root /data1/amazons/work/slab_4x6 --keep all
+# 4x6 q=4 cells=24 free=16 group=4 rows=2706 slabs/row=4845 words/slab=128 classes=1 level=3 canon=min
+# raw table 101.0 GiB in total, peak layer 19.7 GiB, per class 19.7 GiB
+# root /data1/amazons/work/slab_4x6: 1845 GiB free
+# kernel: 2 workers, 16 threads each; aux 32 threads; row buffers 0.2 GiB per worker
+#  k              |P_k|              |W_k|              |L_k|      bytes   ratio   gather    shots  parents  in_wait out_wait     secs
+  16           51482970                  0           51482970       9758 10748.57      0.0      0.0      0.0      0.0      0.0      0.3
+  15          823727520          563958000          259769520    6177013   16.98      0.6      0.5      0.9      0.0      0.0      2.5
+#   k=15: 819416 positions relabelled in memory, no mismatch
+#   layer 16 moved to /data1/amazons/work/slab_4x6 in 0s
+  14         6177956400         2633489470         3544466930   31714635    6.61      0.8      1.2      1.8      0.0      0.0      4.5
+#   k=14: 819412 positions relabelled in memory, no mismatch
+#   layer 15 moved to /data1/amazons/work/slab_4x6 in 0s
+  13        28830463200        20138439344         8692023856  145218507    6.50      1.0      2.0      3.9      0.0      0.0      8.7
+#   k=13: 819408 positions relabelled in memory, no mismatch
+#   layer 14 moved to /data1/amazons/work/slab_4x6 in 0s
+  12        93699005400        52701215742        40997789658  637150312    4.77      1.1      2.1      4.9      0.1      0.0     11.4
+#   k=12: 819412 positions relabelled in memory, no mismatch
+#   layer 13 moved to /data1/amazons/work/slab_4x6 in 0s
+  11       224877612960       167420507716        57457105244 1596073690    4.53      0.9      2.2      5.6      0.3      0.0     13.3
+#   k=11: 819412 positions relabelled in memory, no mismatch
+#   layer 12 moved to /data1/amazons/work/slab_4x6 in 0s
+  10       412275623760       255237701344       157037922416 4046970903    3.27      1.7      2.8      7.4      0.7      0.0     19.6
+#   k=10: 819408 positions relabelled in memory, no mismatch
+#   layer 11 moved to /data1/amazons/work/slab_4x6 in 0s
+   9       588965176800       457603627404       131361549396 5270028608    3.56      1.8      2.8      7.9      1.5      0.0     22.2
+#   k=9: 819408 positions relabelled in memory, no mismatch
+#   layer 10 moved to /data1/amazons/work/slab_4x6 in 0s
+   8       662585823900       430563870791       232021953109 8006766235    2.65      1.9      2.7      8.0      1.9      0.0     25.0
+#   k=8: 819412 positions relabelled in memory, no mismatch
+#   layer 9 moved to /data1/amazons/work/slab_4x6 in 0s
+   7       588965176800       474263530156       114701646644 5915118882    3.17      1.9      2.8      7.9      2.8      0.0     23.9
+#   k=7: 819412 positions relabelled in memory, no mismatch
+#   layer 8 moved to /data1/amazons/work/slab_4x6 in 0s
+   6       412275623760       275515711282       136759912478 5704279477    2.32      1.9      2.7      7.4      2.1      0.0     23.6
+#   k=6: 819412 positions relabelled in memory, no mismatch
+#   layer 7 moved to /data1/amazons/work/slab_4x6 in 0s
+   5       224877612960       187894523812        36983089148 2276529316    3.18      1.8      2.8      7.0      1.8      0.0     19.6
+#   k=5: 819412 positions relabelled in memory, no mismatch
+#   layer 6 moved to /data1/amazons/work/slab_4x6 in 0s
+   4        93699005400        63373824691        30325180709 1354739157    2.25      1.7      3.0      6.7      0.8      0.0     18.6
+#   k=4: 819412 positions relabelled in memory, no mismatch
+#   layer 5 moved to /data1/amazons/work/slab_4x6 in 0s
+   3        28830463200        25148825300         3681637900  270030851    3.50      0.9      2.0      4.9      0.4      0.0     12.2
+#   k=3: 819412 positions relabelled in memory, no mismatch
+#   layer 4 moved to /data1/amazons/work/slab_4x6 in 0s
+   2         6177956400         4103203960         2074752440   95089238    2.21      1.0      1.1      2.6      0.1      0.0      9.5
+#   k=2: 819408 positions relabelled in memory, no mismatch
+#   layer 3 moved to /data1/amazons/work/slab_4x6 in 0s
+   1          823727520          758388472           65339048    7950718   13.19      0.8      0.5      1.1      0.0      0.0      4.1
+#   k=1: 819408 positions relabelled in memory, no mismatch
+#   layer 2 moved to /data1/amazons/work/slab_4x6 in 0s
+   0           51482970           29829063           21653907    1836983   57.10      0.6      0.3      0.7      0.0      0.0      2.0
+#   k=0: 819412 positions relabelled in memory, no mismatch
+# root 4x6: first player wins
+# root 6x4: second player wins
+#   layer 1 moved to /data1/amazons/work/slab_4x6 in 0s
+# totals: win=2417950646547 loss=956037275373 compressed=32.94 GiB
+# io: read 32.94 GiB, written 32.94 GiB; compress 17s, write 13s, read+decompress 13s
+# computed in 221.0s
+#   layer 0 moved to /data1/amazons/work/slab_4x6 in 0s
+# done 221.0s

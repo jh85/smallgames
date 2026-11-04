@@ -1,0 +1,14 @@
+dfa 4x5 k=6 set=W order=row nodes=20885972 width=6636690 positions/node=390.1 secs=83.4
+dfa 4x5 k=6 set=W order=col nodes=37429322 width=12200502 positions/node=217.7 secs=88.5
+dfa 4x5 k=6 set=W order=snake nodes=20885972 width=6636690 positions/node=390.1 secs=81.2
+dfa 4x5 k=6 set=W order=diag nodes=30652279 width=11179497 positions/node=265.8 secs=82.8
+dfa 4x5 k=6 set=W order=rowsoutin nodes=54459001 width=18760651 positions/node=149.6 secs=88.2
+dfa 4x5 k=6 set=W order=spiralin nodes=87090309 width=34841602 positions/node=93.6 secs=81.2
+dfa 4x5 k=6 set=W order=spiralout nodes=31875084 width=11358715 positions/node=255.6 secs=70.8
+dfa 4x5 k=8 set=W order=row nodes=1605733 width=365501 positions/node=2718.3 secs=36.3
+dfa 4x5 k=8 set=W order=col nodes=3833982 width=936414 positions/node=1138.5 secs=43.8
+dfa 4x5 k=8 set=W order=snake nodes=1605733 width=365501 positions/node=2718.3 secs=42.8
+dfa 4x5 k=8 set=W order=diag nodes=3473129 width=972463 positions/node=1256.8 secs=44.7
+dfa 4x5 k=8 set=W order=rowsoutin nodes=8785787 width=2566572 positions/node=496.8 secs=47.2
+dfa 4x5 k=8 set=W order=spiralin nodes=16287260 width=4923427 positions/node=268.0 secs=50.3
+dfa 4x5 k=8 set=W order=spiralout nodes=4329328 width=1135653 positions/node=1008.2 secs=38.3

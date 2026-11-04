@@ -1,0 +1,12 @@
+=== sequential write 30 GiB, 1 MiB direct, queue 4
+write bw=222.1 MB/s
+=== sequential read 30 GiB, 1 MiB direct, queue 4
+read bw=224.2 MB/s
+=== tile pattern: random 64 MiB reads, 3 GiB read
+tile read bw=216.2 MB/s
+=== 4 KiB random read latency, 20 s
+4k random iops=130
+=== mixed: write new file while reading old, both 1 MiB direct, 60 s
+mr read bw=90.8 MB/s
+mw write bw=90.6 MB/s
+done
