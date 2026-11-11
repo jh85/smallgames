@@ -30,6 +30,9 @@ value of every placement. The `WxH` table therefore also answers the rotated
 | `slabsolve solve WxH --root DIR` | Bit-parallel, out-of-core solver. It decides all arrow subsets of a queen placement at once, as masks and shifts on 512-bit words, and streams layers through files. Needs AVX-512 with VBMI and GFNI, and libzstd. |
 | `slabsolve probe WxH --root DIR` | Value of one position from a finished run, and optionally of every move. |
 | `slabsolve playout WxH --root DIR` | Plays whole games from both orientations with the table and checks it against the rules at every ply. |
+| `slabsolve reach WxH --root DIR` | Positions reachable from the standard starts, counted exactly per layer without symmetry reduction, by the same kernel run forwards. With `--w-root` and `--pkg-root` it also writes a WDL package: the solved layers masked to reachable positions. |
+| `slabsolve pkgcheck WxH --root FULL --pkg-root PKG` | Random games from both starts, comparing a package with the full table at every ply. |
+| `wdl/wdl_query.cpp`, `wdl/make_wdl_package.py` | Standalone query of a package by move list, and the script that adds statistics, README and checksums to a package. |
 | `slabsolve bench WxH` | Kernel timing on real board sizes, without solving anything first. |
 | `amzdfa solve WxH` | Symbolic solver. Sets are minimal layered DFAs, and each preimage is one level-by-level subset construction over an automaton of all moves. |
 | `dense solve WxH DIR` | One bit per position, reduced by board symmetry. Faster and more predictable than the DFA in the middle game. |
@@ -66,6 +69,17 @@ ctest --test-dir build -R dfa_crosscheck
 
 # Games played with the table, checked against the rules at every ply
 ./build/slabsolve playout 4x7 --root /fast/amz --root /slow/amz --games 200
+
+# Exact reachable counts for both starts, and one WDL package per start (add --plan first to print buffer sizes)
+./build/slabsolve reach 4x7 --root /fast/reach --w-root /fast/amz --w-root /slow/amz \
+  --pkg std=/slow2/amazons-4x7-wdl --pkg tr=/slow2/amazons-7x4-wdl --seeds std:stab,tr:stab
+python3 wdl/make_wdl_package.py 4x7 /fast/reach /slow2/amazons-4x7-wdl ./wdl_query
+python3 wdl/make_wdl_package.py 7x4 /fast/reach /slow2/amazons-7x4-wdl ./wdl_query
+
+# Or one package answering both boards (--pkg-root; repeat it to spill onto another disk)
+./build/slabsolve reach 5x6 --root /fast/reach --w-root /fast/amz --w-root /slow/amz \
+  --pkg-root /slow2/amazons-5x6-6x5-wdl --seeds std:stab,tr:stab
+python3 wdl/make_wdl_package.py 5x6,6x5 /fast/reach /slow2/amazons-5x6-6x5-wdl ./wdl_query
 
 # Check every position of every layer against tables from the dense solver
 ./build/slabsolve solve 4x5 --root DIR --compare DENSE_DIR

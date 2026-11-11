@@ -78,6 +78,23 @@
         lists every legal move with its value
     slabsolve playout WxH --root DIR [--root DIR2] [--games G] [--sample S]
         plays whole games and checks the stored table against the rules at every ply
+    slabsolve reach WxH --root DIR [--w-root DIR ...] [--pkg-root DIR] [options]
+        positions reachable from a start, counted exactly per layer, without symmetry
+        reduction; see "reach" below.  With --w-root, the solved store's layers are masked
+        to the positions reachable from any seed set and written to --pkg-root, in the
+        solver's own format: a WDL package that `probe`, `playout` and wdl/wdl_query.cpp read
+        --seeds LIST       comma separated: std, tr (the HxW start on this board), both, or
+                           custom (--start-m CELLS --start-o CELLS), each :stab (exact
+                           counts, one plane per coset of the start's symmetry group) or
+                           :closure (one plane, closed under all symmetries).  std:stab,tr:stab
+        --kmax K           stop after the step into layer K
+        --mem-gib G        buffer budget; double buffering is dropped beyond it (450)
+        --pkg-level L      zstd level of the package (9)
+        --plan             print each step's buffer sizes and exit; writes nothing
+        --brute-check      tiny boards only: compare every gathered bit with a breadth-first
+                           search of the first seed set
+    slabsolve pkgcheck WxH --root FULL --pkg-root PKG [--games G]
+        random games from both starts, comparing a package with the full store at every ply
     slabsolve selftest
         checks every low-bit permutation and index permutation against its definition
 
@@ -934,8 +951,9 @@ void ExpandSlabPlain(const u64* src, int k, V* out) {
   }
 }
 
-// The complement of w within the live bits, in numeric order.  Returns its popcount.
-u64 CompactLosses(const V* w, int k, u64* dst) {
+// The live bits of w (or their complement), in numeric order.  Returns the popcount.
+template <bool kInvert>
+u64 CompactBits(const V* w, int k, u64* dst) {
   const u64* lanes = reinterpret_cast<const u64*>(w);
   u64 acc = 0, total = 0;
   int fill = 0;
@@ -949,7 +967,7 @@ u64 CompactLosses(const V* w, int k, u64* dst) {
       if (ja < 0 || ja > 6) continue;
       const int cnt = LCNT[a][ja];
       if (!cnt) continue;
-      const u64 v = _pext_u64(~l[a], LMASK[a][ja]);
+      const u64 v = _pext_u64(kInvert ? ~l[a] : l[a], LMASK[a][ja]);
       total += u64(__builtin_popcountll(v));
       acc |= v << fill;
       fill += cnt;
@@ -963,6 +981,8 @@ u64 CompactLosses(const V* w, int k, u64* dst) {
   if (fill) *d++ = acc;
   return total;
 }
+
+u64 CompactLosses(const V* w, int k, u64* dst) { return CompactBits<true>(w, k, dst); }
 
 std::vector<std::vector<u32>> g_unrank;  // k, colex rank -> arrow index
 std::vector<u32> g_rank;                 // arrow index -> colex rank
@@ -1196,10 +1216,11 @@ void BuildTiles() {
 struct Geom {
   u64 stride, slab_bytes, chunk_slabs;
 };
-inline Geom GeomOf(int k) {
+// A slab of a store with several planes holds that many compact bit vectors in a row.
+inline Geom GeomOf(int k, int planes = 1) {
   Geom g;
   g.stride = StrideWords(k);
-  g.slab_bytes = g.stride * 8;
+  g.slab_bytes = g.stride * 8 * u64(planes);
   g.chunk_slabs = std::max<u64>(1, kChunkRaw / g.slab_bytes);
   return g;
 }
@@ -1383,6 +1404,8 @@ bool ParseIndex(const std::string& path, int k, int c, ClassIndex* ci) {
 // All the classes of one layer on disk.
 struct LayerFiles {
   int k = -1;
+  const std::vector<std::string>* roots = &g_roots;
+  int planes = 1;
   std::vector<ClassIndex> cls;
   std::vector<int> fds;
   void Load(int layer) {
@@ -1390,8 +1413,8 @@ struct LayerFiles {
     cls.assign(size_t(D), ClassIndex());
     fds.assign(size_t(D), -1);
     for (int c = 0; c < D; ++c) {
-      for (size_t r = 0; r < g_roots.size(); ++r) {
-        if (ParseIndex(IndexPath(g_roots[r], k, c), k, c, &cls[size_t(c)])) {
+      for (size_t r = 0; r < roots->size(); ++r) {
+        if (ParseIndex(IndexPath((*roots)[r], k, c), k, c, &cls[size_t(c)])) {
           cls[size_t(c)].root = int(r);
           break;
         }
@@ -1407,7 +1430,7 @@ struct LayerFiles {
   void Open() {
     for (int c = 0; c < D; ++c) {
       if (fds[size_t(c)] >= 0 || !cls[size_t(c)].present) continue;
-      const std::string p = DataPath(g_roots[size_t(cls[size_t(c)].root)], k, c);
+      const std::string p = DataPath((*roots)[size_t(cls[size_t(c)].root)], k, c);
       const int fd = ::open(p.c_str(), O_RDONLY);
       if (fd < 0) Die("cannot open " + p + ": " + std::strerror(errno));
       fds[size_t(c)] = fd;
@@ -1469,7 +1492,7 @@ IoStats g_io;
 
 // Reads tile d of every class of a layer into memory: the rows of class d.
 void ReadRows(const LayerFiles& lf, int d, char* inbuf, const std::vector<u64>& base, TaskPool& aux) {
-  const Geom g = GeomOf(lf.k);
+  const Geom g = GeomOf(lf.k, lf.planes);
   const double t0 = Now();
   Latch latch;
   ByteGate gate(u64(16) << 30);
@@ -1511,8 +1534,11 @@ void ReadRows(const LayerFiles& lf, int d, char* inbuf, const std::vector<u64>& 
 
 // Compresses the columns of class c into tiles and writes them as one file.
 // outbuf holds rows_in_class * SPR slabs.
-void WriteClass(int k, int c, const char* outbuf, u64 loss_raw, TaskPool& aux, ClassIndex* result) {
-  const Geom g = GeomOf(k);
+// The file goes to the first of roots with room.  may_move: the layer will later move to the
+// last root, so a middle root is skipped when the last one has room.
+void WriteClass(int k, int c, const char* outbuf, u64 loss_raw, TaskPool& aux, ClassIndex* result, const std::vector<std::string>& roots, int planes,
+                bool may_move, int level) {
+  const Geom g = GeomOf(k, planes);
   const double t0 = Now();
   const u64 rb = g_class_begin[size_t(c)], re = g_class_begin[size_t(c) + 1];
   struct Tile {
@@ -1529,7 +1555,6 @@ void WriteClass(int k, int c, const char* outbuf, u64 loss_raw, TaskPool& aux, C
     }
   }
   // One task per frame, so a single large tile still uses every thread.
-  const int level = LevelFor(k);
   Latch latch;
   std::atomic<u64> raw_total{0};
   for (int d = 0; d < D; ++d) {
@@ -1577,12 +1602,12 @@ void WriteClass(int k, int c, const char* outbuf, u64 loss_raw, TaskPool& aux, C
   // First root with room.  A root that fails is skipped, so a disk going away does not
   // stop the run while another can take the file.
   bool stored = false;
-  for (size_t r = 0; r < g_roots.size() && !stored; ++r) {
-    const std::string& root = g_roots[r];
+  for (size_t r = 0; r < roots.size() && !stored; ++r) {
+    const std::string& root = roots[r];
     if (FreeBytes(root) < total + g_reserve) continue;
     // A kept layer ends up on the last root, so from a middle root it would only have to
     // move again.  The solver reads it once more, which checks every frame.
-    if (r > 0 && r + 1 < g_roots.size() && g_keep != kKeepNone && KeepLayer(k) && FreeBytes(g_roots.back()) >= total + g_reserve) continue;
+    if (r > 0 && r + 1 < roots.size() && may_move && FreeBytes(roots.back()) >= total + g_reserve) continue;
     const std::string dir = LayerDir(root, k);
     if (::mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) {
       std::fprintf(stderr, "slabsolve: warning: cannot create %s: %s\n", dir.c_str(), std::strerror(errno));
@@ -1640,7 +1665,7 @@ void WriteClass(int k, int c, const char* outbuf, u64 loss_raw, TaskPool& aux, C
 // Random access to the files of a layer, for verification and probes.
 class SlabReader {
  public:
-  explicit SlabReader(LayerFiles* lf) : lf_(lf), g_(GeomOf(lf->k)) {
+  explicit SlabReader(LayerFiles* lf) : lf_(lf), g_(GeomOf(lf->k, lf->planes)) {
     frame_off_.resize(size_t(D));
     for (int c = 0; c < D; ++c) {
       frame_off_[size_t(c)].resize(size_t(D));
@@ -1657,7 +1682,10 @@ class SlabReader {
     }
   }
   // The mover loses (m, o, a), with arrows a of the layer's popcount.
-  bool Loss(u64 m, u64 o, u64 a) {
+  bool Loss(u64 m, u64 o, u64 a) { return Bit(m, o, a, 0); }
+  // The stored bit of (m, o, a) in one plane, for the slab keyed by mover m and column o.
+  // No symmetry is applied to the plane; see ReachLabels for stores where that matters.
+  bool Bit(u64 m, u64 o, u64 a, int plane) {
     const u32 e = g_rowmap[RankSubset(o)];
     const int g = int(e & 7);
     const u64 col = e >> 3;
@@ -1669,7 +1697,7 @@ class SlabReader {
     const u64 slab = u64(g_colstart[col * u64(D) + u64(d)]) + g_ordinal[col * SPR + j];
     const u64 frame = slab / g_.chunk_slabs;
     const char* raw = Chunk(c, d, frame);
-    const u64 w = (slab % g_.chunk_slabs) * g_.stride + (r >> 6);
+    const u64 w = (slab % g_.chunk_slabs) * (g_.slab_bytes / 8) + u64(plane) * g_.stride + (r >> 6);
     u64 word;
     std::memcpy(&word, raw + w * 8, 8);
     return (word >> (r & 63)) & 1;
@@ -1843,12 +1871,12 @@ struct Worker {
   std::vector<std::unique_ptr<PermScratch>> perm;
   double t_gather = 0, t_shots = 0, t_parents = 0;
 
-  void Init(const std::vector<int>& cpus) {
+  void Init(const std::vector<int>& cpus, int planes, bool with_shots) {
     pool = std::make_unique<Pool>(cpus);
-    child_vs = size_t(SPR) * WORDS;
-    shot_vs = child_vs * size_t(Q);
+    child_vs = size_t(SPR) * WORDS * size_t(planes);
+    shot_vs = with_shots ? child_vs * size_t(Q) : 0;
     child = BigAlloc<V>(child_vs);
-    shots = BigAlloc<V>(shot_vs);
+    shots = shot_vs ? BigAlloc<V>(shot_vs) : nullptr;
     scratch = BigAlloc<V>(size_t(pool->size()) * 3 * WORDS);
     for (int t = 0; t < pool->size(); ++t) perm.emplace_back(new PermScratch());
   }
@@ -1870,7 +1898,7 @@ struct Worker {
 
 std::vector<std::unique_ptr<Worker>> g_workers;
 
-void InitWorkers(int total_threads, int workers) {
+void InitWorkers(int total_threads, int workers, int planes = 1, bool with_shots = true) {
   const CpuTopology topo = ReadTopology();
   const int nodes = int(topo.primary.size());
   if (workers <= 0) workers = nodes;
@@ -1888,7 +1916,7 @@ void InitWorkers(int total_threads, int workers) {
     auto wk = std::make_unique<Worker>();
     std::thread init([&] {
       PinCaller(cpus[0]);
-      wk->Init(cpus);
+      wk->Init(cpus, planes, with_shots);
       wk->ClearTables();
     });
     init.join();
@@ -2153,8 +2181,8 @@ void VerifyLayerFromFiles(LayerFiles& cur, LayerFiles* next, u64 samples, int th
 
 // ------------------------------------------------------------ layer upkeep
 
-void DeleteLayer(int k) {
-  for (const std::string& root : g_roots) {
+void DeleteLayer(int k, const std::vector<std::string>& roots = g_roots) {
+  for (const std::string& root : roots) {
     const std::string dir = LayerDir(root, k);
     if (!FileExists(dir)) continue;
     for (int c = 0; c < D; ++c) {
@@ -2520,9 +2548,11 @@ int CmdSolve(const std::string& compare_dir, int kmin, u64 verify_samples, int a
       out_wait += Now() - tw1;
       ClassIndex* slot_index = &cls[size_t(c)];
       if (two_out) {
-        writer = std::thread([k, c, outbuf, class_loss, &aux, slot_index] { WriteClass(k, c, outbuf, class_loss, aux, slot_index); });
+        writer = std::thread([k, c, outbuf, class_loss, &aux, slot_index] {
+          WriteClass(k, c, outbuf, class_loss, aux, slot_index, g_roots, 1, g_keep != kKeepNone && KeepLayer(k), LevelFor(k));
+        });
       } else {
-        WriteClass(k, c, outbuf, class_loss, aux, slot_index);
+        WriteClass(k, c, outbuf, class_loss, aux, slot_index, g_roots, 1, g_keep != kKeepNone && KeepLayer(k), LevelFor(k));
       }
       cur_out ^= int(two_out);
       cur_in ^= int(two_in);
@@ -2602,16 +2632,903 @@ int CmdSolve(const std::string& compare_dir, int kmin, u64 verify_samples, int a
   return 0;
 }
 
+struct Move {
+  int f, t, s;
+};
+std::vector<Move> LegalMoves(u64 m, u64 o, u64 a);
+
+// ------------------------------------------------------------------ reach
+//
+// Positions reachable from a start, layer by layer, with the same kernel in reverse:
+//
+//     R_{k+1}(Y, X', A') = exists t in X', s in A' on a ray from t with the path clear of A',
+//                          and f on a ray from t with the path clear of A' - s, such that
+//                          R_k(X' - t + f, Y, A' - s)
+//
+// Stage A, per child slab (Y, X') and queen t:  U_t(A'') = OR over f of R_k(X' - t + f, Y, A''),
+// read in the parent's index.  That is ApplyMove with the roles of t and f exchanged.
+// Stage B:  R_{k+1}(A') |= U_t(A' - s), the shot of BuildShots run backwards.
+//
+// The store of R is transposed against the solver's: column Y holds the slabs with mover Y.
+// Then the parents of the children with mover Y are the row Y, exactly as in the solver,
+// and that row has the layout of column Y of the solver's own store, so a solved layer
+// can be masked with R slab by slab while R is being computed.
+//
+// Symmetry.  Slabs are shared by the board symmetries G, but a set reachable from one start
+// is only invariant under the subgroup H that fixes the start.  So a seed set keeps one
+// plane per right coset H r_i of H in G:  plane i of p is [r_i p in A].  Fetching a slab
+// through a symmetry permutes the planes (PlanePerm), and each plane follows the forward
+// rule on its own, because a symmetry maps the predecessors of p onto those of its image.
+// With H = G there is one plane, the set closed under G.
+//
+// Counts.  Raw counts, without symmetry, follow from the planes: the positions whose queen
+// set is in the orbit of a canonical Y number |H| * orbit(Y) / |G| * sum of the planes'
+// popcounts over the slabs of Y.  Each layer is counted twice, from the output columns and
+// again from the gathered rows of the next step, which exercises every plane permutation.
+
+struct SeedSet {
+  std::string name;
+  std::vector<std::pair<u64, u64>> starts;  // (mover, opponent) at layer 0, closed under H
+  std::vector<int> h;                       // elements of the subgroup
+  std::vector<int> reps;                    // right coset representatives
+  int first = 0;                            // first plane
+};
+std::vector<SeedSet> g_seeds;
+int g_planes = 1;
+std::vector<std::vector<int>> g_plane_perm;  // g -> plane of the target -> plane of the stored slab
+std::vector<std::string> g_wroots, g_proots;
+
+// A package: the solved layers masked to the closure of one seed set (seed >= 0), or of all
+// of them (seed -1, --pkg-root).
+struct Pkg {
+  int seed = -1;
+  std::string seed_name;
+  std::vector<std::string> roots;
+};
+std::vector<Pkg> g_pkgs;
+
+// The planes of a package's mask.
+inline void PkgPlanes(const Pkg& p, int* first, int* count) {
+  if (p.seed < 0) {
+    *first = 0, *count = g_planes;
+  } else {
+    *first = g_seeds[size_t(p.seed)].first, *count = int(g_seeds[size_t(p.seed)].reps.size());
+  }
+}
+
+inline int ComposeElem(int a, int b) {  // the element c -> a(b(c))
+  for (int e = 0; e < GN; ++e) {
+    bool same = true;
+    for (int c = 0; c < N && same; ++c) same = GPERM[e][c] == GPERM[a][GPERM[b][c]];
+    if (same) return e;
+  }
+  Die("the symmetries are not a group");
+}
+inline int InverseElem(int a) {
+  for (int e = 0; e < GN; ++e) {
+    if (ComposeElem(a, e) == 0) return e;
+  }
+  Die("no inverse");
+}
+
+void BuildSeedSets() {
+  g_planes = 0;
+  for (SeedSet& s : g_seeds) {
+    if (s.h.empty()) {  // the stabilizer of the start set
+      for (int g = 0; g < GN; ++g) {
+        bool ok = true;
+        for (const auto& [m, o] : s.starts) {
+          bool found = false;
+          for (const auto& [m2, o2] : s.starts) found = found || (Transform(g, m) == m2 && Transform(g, o) == o2);
+          ok = ok && found;
+        }
+        if (ok) s.h.push_back(g);
+      }
+    }
+    std::vector<std::pair<u64, u64>> closed;
+    for (const auto& [m, o] : s.starts) {
+      for (const int g : s.h) {
+        const std::pair<u64, u64> p{Transform(g, m), Transform(g, o)};
+        if (std::find(closed.begin(), closed.end(), p) == closed.end()) closed.push_back(p);
+      }
+    }
+    s.starts = closed;
+    auto in_h = [&](int e) { return std::find(s.h.begin(), s.h.end(), e) != s.h.end(); };
+    s.reps.clear();
+    for (int e = 0; e < GN; ++e) {
+      bool covered = false;
+      for (const int r : s.reps) covered = covered || in_h(ComposeElem(e, InverseElem(r)));
+      if (!covered) s.reps.push_back(e);
+    }
+    if (s.reps.size() * s.h.size() != size_t(GN)) Die("coset count does not divide the group");
+    s.first = g_planes;
+    g_planes += int(s.reps.size());
+  }
+  g_plane_perm.assign(size_t(GN), std::vector<int>(size_t(g_planes), -1));
+  for (int g = 0; g < GN; ++g) {
+    const int gi = InverseElem(g);
+    for (const SeedSet& s : g_seeds) {
+      for (size_t i = 0; i < s.reps.size(); ++i) {
+        const int a = ComposeElem(s.reps[i], gi);
+        for (size_t j = 0; j < s.reps.size(); ++j) {
+          if (std::find(s.h.begin(), s.h.end(), ComposeElem(a, InverseElem(s.reps[j]))) != s.h.end()) {
+            g_plane_perm[size_t(g)][size_t(s.first) + i] = s.first + int(j);
+          }
+        }
+      }
+    }
+    for (int i = 0; i < g_planes; ++i) {
+      if (g_plane_perm[size_t(g)][size_t(i)] < 0) Die("plane permutation incomplete");
+    }
+  }
+}
+
+// Per layer and side: for each seed set its raw count and its G-closure, then the closure of
+// all sets; with a solved layer also the reachable positions the mover wins.
+struct ReachStats {
+  std::vector<u64> v;
+  ReachStats() : v(2 * g_seeds.size() + 2 + g_seeds.size(), 0) {}
+  u64& raw(size_t s) { return v[2 * s]; }
+  u64& closure(size_t s) { return v[2 * s + 1]; }
+  u64& all() { return v[2 * g_seeds.size()]; }
+  u64& all_loss() { return v[2 * g_seeds.size() + 1]; }
+  u64& wins(size_t s) { return v[2 * g_seeds.size() + 2 + s]; }
+  void Add(const ReachStats& o) {
+    for (size_t i = 0; i < v.size(); ++i) v[i] += o.v[i];
+  }
+};
+
+// Counts of one slab whose queen set (mover for an output column, opponent for an input row)
+// is canonical row yi.  planes: compact vectors of `stride` words each.  loss: the solved
+// slab's losses, or null.
+void CountSlab(const u64* planes, u64 stride, u64 yi, const u64* loss, ReachStats* st) {
+  const u64 orbit = u64(g_orbit[yi]);
+  for (size_t si = 0; si < g_seeds.size(); ++si) {
+    const SeedSet& s = g_seeds[si];
+    u64 cnt = 0, clo = 0, win = 0;
+    for (u64 w = 0; w < stride; ++w) {
+      u64 any = 0;
+      for (size_t i = 0; i < s.reps.size(); ++i) {
+        const u64 b = planes[(size_t(s.first) + i) * stride + w];
+        cnt += u64(__builtin_popcountll(b));
+        if (loss) win += u64(__builtin_popcountll(b & ~loss[w]));
+        any |= b;
+      }
+      clo += u64(__builtin_popcountll(any));
+    }
+    // Numerators: only the sum over a whole row is a multiple of |G| (RowDone).
+    st->raw(si) += u64(s.h.size()) * orbit * cnt;
+    st->wins(si) += u64(s.h.size()) * orbit * win;
+    st->closure(si) += clo * orbit;
+  }
+  u64 any_cnt = 0, loss_cnt = 0;
+  for (u64 w = 0; w < stride; ++w) {
+    u64 any = 0;
+    for (int i = 0; i < g_planes; ++i) any |= planes[size_t(i) * stride + w];
+    any_cnt += u64(__builtin_popcountll(any));
+    if (loss) loss_cnt += u64(__builtin_popcountll(any & loss[w]));
+  }
+  st->all() += any_cnt * orbit;
+  st->all_loss() += loss_cnt * orbit;
+}
+
+// Turns a row's numerators into counts.  A remainder means the planes are inconsistent.
+void RowDone(ReachStats* st, u64 yi) {
+  for (size_t si = 0; si < g_seeds.size(); ++si) {
+    if (st->raw(si) % u64(GN) || st->wins(si) % u64(GN)) {
+      Die("reach count of row " + std::to_string(yi) + " is not a whole number; the plane symmetry is broken");
+    }
+    st->raw(si) /= u64(GN);
+    st->wins(si) /= u64(GN);
+  }
+}
+
+// O(A) |= U(A - s) for A that contain s and none of the cells `before` it on the ray.
+inline void ApplyShot(V* o, const V* u, u32 before, int b) {
+  const u32 ph = before >> 9;
+  const V nb = NOTSET[before & 511];
+  if (b >= 9) {
+    const u32 hbit = u32(1) << (b - 9);
+    for (const u32 i : g_lq.list) {
+      if (i & (ph | hbit)) continue;
+      V* d = o + (i | hbit);
+      _mm512_store_si512(d, OrAnd(_mm512_load_si512(d), _mm512_load_si512(u + i), nb));
+    }
+    return;
+  }
+  const V m = _mm512_andnot_si512(NOTSET[1u << b], nb);
+  for (const u32 i : g_lq.list) {
+    if (i & ph) continue;
+    const V w = _mm512_load_si512(u + i);
+    const V sh = b < 6 ? _mm512_slli_epi64(w, 1u << b) : _mm512_permutexvar_epi64(LANEUP[b - 6], w);
+    V* d = o + i;
+    _mm512_store_si512(d, OrAnd(_mm512_load_si512(d), sh, m));
+  }
+}
+
+// One plane of the child slab (mover y, opponent x): parents are plane `plane` of the row in
+// `rowp`, slab RankIn(P, y), `planes` slabs per position.
+void ReachChild(u64 y, u64 x, const V* rowp, int plane, V* u, V* o) {
+  const u64 occ = x | y;
+  const u64 child_free = ~occ & BOARD;
+  std::memset(static_cast<void*>(o), 0, size_t(WORDS) * sizeof(V));
+  for (u64 xs = x; xs; xs &= xs - 1) {
+    const int t = __builtin_ctzll(xs);
+    const u64 tbit = u64(1) << t;
+    ClearLive(u);
+    bool any = false;
+    for (int d = 0; d < 8; ++d) {
+      u32 path = 0;
+      for (int j = 0; j < RAYLEN[t][d]; ++j) {
+        const int c = RAYCELL[t][d][j];
+        const u64 cbit = u64(1) << c;
+        if (occ & cbit) break;
+        const int bt = __builtin_popcountll(child_free & (cbit - 1));
+        path |= u32(1) << bt;
+        const u64 p = x ^ tbit ^ cbit;
+        const u64 parent_free = ~(p | y) & BOARD;
+        const int bf = __builtin_popcountll(parent_free & (tbit - 1));
+        const V* q = rowp + (RankIn(p, y) * u64(g_planes) + u64(plane)) * WORDS;
+        ApplyMove(u, q, path >> 9, path & 511, bt, bf);
+        any = true;
+      }
+    }
+    if (!any) continue;
+    for (int d = 0; d < 8; ++d) {
+      u32 before = 0;
+      for (int j = 0; j < RAYLEN[t][d]; ++j) {
+        const int c = RAYCELL[t][d][j];
+        const u64 cbit = u64(1) << c;
+        if (occ & cbit) break;
+        const int b = __builtin_popcountll(child_free & (cbit - 1));
+        ApplyShot(o, u, before, b);
+        before |= u32(1) << b;
+      }
+    }
+  }
+}
+
+// The forward rule cell by cell, for checks: some predecessor of (m, o, a) is in the input.
+template <class InFn>
+bool ExplicitReach(u64 m, u64 o, u64 a, InFn&& in) {
+  const u64 queens = m | o;
+  for (u64 oo = o; oo; oo &= oo - 1) {
+    const int t = __builtin_ctzll(oo);
+    int tx, ty;
+    CellXY(t, &tx, &ty);
+    for (int d = 0; d < 8; ++d) {
+      for (int sx = tx + DX[d], sy = ty + DY[d]; sx >= 0 && sx < W && sy >= 0 && sy < H; sx += DX[d], sy += DY[d]) {
+        const int s = CellId(sx, sy);
+        if ((queens >> s) & 1) break;
+        if (!((a >> s) & 1)) continue;
+        const u64 a2 = a & ~(u64(1) << s);
+        for (int d2 = 0; d2 < 8; ++d2) {
+          for (int fx = tx + DX[d2], fy = ty + DY[d2]; fx >= 0 && fx < W && fy >= 0 && fy < H; fx += DX[d2], fy += DY[d2]) {
+            const int f = CellId(fx, fy);
+            if (((queens | a2) >> f) & 1) break;
+            if (in((o & ~(u64(1) << t)) | (u64(1) << f), m, a2)) return true;
+          }
+        }
+        break;  // an arrow stops the shot
+      }
+    }
+  }
+  return false;
+}
+
+struct ReachContext {
+  int k;  // input layer
+  const char* inbuf;
+  const std::vector<u64>* in_base;
+  char* outbuf;                       // layer k + 1, g_planes planes
+  const char* wbuf = nullptr;         // solved layer k, class file by tile
+  const std::vector<u64>* w_base = nullptr;
+  std::vector<char*> pkgbufs;         // masked layer k, one per package
+  u64 class_begin;
+  int check_every;
+  std::mutex* m;
+  bool brute = false;
+  ReachStats* in_stats;
+  ReachStats* out_stats;
+  std::atomic<u64>* checked;
+};
+
+void ProcessReachRow(Worker& wk, u64 yi, const ReachContext& cx, size_t chunk) {
+  const int k = cx.k;
+  const Geom gin = GeomOf(k, g_planes), gout = GeomOf(k + 1, g_planes), gw = GeomOf(k, 1);
+  const u64 y = g_rows[yi];
+  const u64 rest = ~y & BOARD;
+  const int dclass = ClassOfRow(yi);
+  const u64 row_local = yi - cx.class_begin;
+  Pool& pool = *wk.pool;
+  ReachStats in_st, out_st;
+  std::mutex local;
+  // The row: parents (P, y) for every P, each plane seen through the fetch symmetry.
+  pool.For(size_t(SPR), chunk, [&](size_t j, int tid) {
+    const u64 xp = _pdep_u64(g_qsub[j], rest);
+    const u32 e = g_rowmap[RankSubset(xp)];
+    const int g = int(e & 7);
+    const u64 col = e >> 3;
+    const u64 gy = Transform(g, y), gx = Transform(g, xp);
+    const u64 sj = RankIn(gy, gx);
+    const u64 slab = u64(g_colstart[col * u64(D) + u64(dclass)]) + g_ordinal[col * SPR + sj];
+    const u64* src = reinterpret_cast<const u64*>(cx.inbuf + (*cx.in_base)[size_t(ClassOfRow(col))] + slab * gin.slab_bytes);
+    for (int i = 0; i < g_planes; ++i) {
+      const u64* sp = src + u64(g_plane_perm[size_t(g)][size_t(i)]) * gin.stride;
+      V* out = wk.child + (j * size_t(g_planes) + size_t(i)) * WORDS;
+      if (g == 0) ExpandSlabStream(sp, k, out);
+      else ExpandSlabVia(sp, k, ~(gy | gx) & BOARD, ~(y | xp) & BOARD, g, wk.Scratch(tid, 2), out, *wk.perm[size_t(tid)]);
+    }
+  });
+  if (cx.brute) {
+    // Brute force for tiny boards: the true sets A_k from the first start of the first seed
+    // set, against every gathered bit of plane set 0.
+    static std::mutex bm;
+    static std::vector<std::set<std::array<u64, 3>>> layers;
+    {
+      std::lock_guard<std::mutex> l(bm);
+      if (layers.empty()) {
+        const auto [m0, o0] = g_seeds[0].starts[0];
+        layers.push_back({{m0, o0, 0}});
+        for (int kk = 0; kk < F; ++kk) {
+          std::set<std::array<u64, 3>> next;
+          for (const auto& p : layers.back()) {
+            for (const Move& v : LegalMoves(p[0], p[1], p[2])) {
+              const u64 moved = (p[0] & ~(u64(1) << v.f)) | (u64(1) << v.t);
+              next.insert({p[1], moved, p[2] | (u64(1) << v.s)});
+            }
+          }
+          layers.push_back(std::move(next));
+        }
+        for (size_t kk = 0; kk < layers.size(); ++kk) std::printf("# brute force layer %zu: %zu\n", kk, layers[kk].size());
+      }
+    }
+    const SeedSet& st = g_seeds[0];
+    for (size_t j = 0; j < SPR; ++j) {
+      const u64 xp = _pdep_u64(g_qsub[j], rest);
+      const u64 fr = ~(xp | y) & BOARD;
+      for (size_t i = 0; i < st.reps.size(); ++i) {
+        const u64* pl = reinterpret_cast<const u64*>(wk.child + (j * size_t(g_planes) + size_t(st.first) + i) * WORDS);
+        for (u32 ai : g_unrank[size_t(k)]) {
+          const u64 arr = _pdep_u64(ai, fr);
+          const int r = st.reps[i];
+          const bool want = layers[size_t(k)].count({Transform(r, xp), Transform(r, y), Transform(r, arr)}) > 0;
+          const bool got = (pl[ai >> 6] >> (ai & 63)) & 1;
+          if (want != got) {
+            const u32 e = g_rowmap[RankSubset(xp)];
+            std::fprintf(stderr, "bfs mismatch k=%d mover=%" PRIx64 " opp=%" PRIx64 " a=%" PRIx64 " plane=%zu rep=%d fetch g=%u: got %d want %d\n", k, xp, y, arr, i, r, e & 7, int(got), int(want));
+            Die("bfs");
+          }
+        }
+      }
+    }
+  }
+  // Input-side counts, and the solved layer masked with the closure of every seed set.
+  pool.For(size_t(SPR), chunk, [&](size_t j, int) {
+    thread_local std::vector<u64> planes, mask;
+    planes.assign(size_t(g_planes) * gin.stride + 1, 0);
+    for (int i = 0; i < g_planes; ++i) CompactBits<false>(wk.child + (j * size_t(g_planes) + size_t(i)) * WORDS, k, planes.data() + size_t(i) * gin.stride);
+    const u64* loss = nullptr;
+    if (cx.wbuf) {
+      const u64 xp = _pdep_u64(g_qsub[j], rest);
+      const int d = g_set_class[RankSubset(xp)];
+      const u64 slab = u64(g_colstart[yi * u64(D) + u64(d)]) + g_ordinal[yi * SPR + j];
+      loss = reinterpret_cast<const u64*>(cx.wbuf + (*cx.w_base)[size_t(d)] + slab * gw.slab_bytes);
+      for (size_t pi = 0; pi < g_pkgs.size(); ++pi) {
+        int first, count;
+        PkgPlanes(g_pkgs[pi], &first, &count);
+        u64* dst = reinterpret_cast<u64*>(cx.pkgbufs[pi] + (row_local * SPR + j) * gw.slab_bytes);
+        for (u64 w = 0; w < gw.stride; ++w) {
+          u64 any = 0;
+          for (int i = first; i < first + count; ++i) any |= planes[size_t(i) * gin.stride + w];
+          dst[w] = loss[w] & any;
+        }
+      }
+    }
+    ReachStats st;
+    CountSlab(planes.data(), gin.stride, yi, loss, &st);
+    std::lock_guard<std::mutex> l(local);
+    in_st.Add(st);
+  });
+  // The children (y, x) for every x.
+  const u64 out_words = gout.slab_bytes / 8;
+  pool.For(size_t(SPR), chunk, [&](size_t j, int tid) {
+    const u64 x = _pdep_u64(g_qsub[j], rest);
+    u64* dst = reinterpret_cast<u64*>(cx.outbuf + (row_local * SPR + j) * gout.slab_bytes);
+    V* u = wk.Scratch(tid, 0);
+    V* o = wk.Scratch(tid, 1);
+    const bool check = cx.check_every && ((yi * 2654435761ULL + j * 40503ULL + u64(k)) % u64(cx.check_every)) == 0;
+    std::mt19937_64 rng(yi * 1000003ULL + j * 31ULL + u64(k));
+    for (int i = 0; i < g_planes; ++i) {
+      ReachChild(y, x, wk.child, i, u, o);
+      if (check) {
+        const u64 fr = ~(x | y) & BOARD;
+        const auto& un = g_unrank[size_t(k + 1)];
+        const u64* ol = reinterpret_cast<const u64*>(o);
+        for (int n = 0; n < 4; ++n) {
+          const u32 ai = un[rng() % un.size()];
+          const u64 a = _pdep_u64(ai, fr);
+          const bool got = (ol[ai >> 6] >> (ai & 63)) & 1;
+          const bool want = ExplicitReach(y, x, a, [&](u64 pm, u64 po, u64 pa) {
+            const u64 idx = _pext_u64(pa, ~(pm | po) & BOARD);
+            const u64* c = reinterpret_cast<const u64*>(wk.child + (RankIn(pm, po) * u64(g_planes) + u64(i)) * WORDS);
+            return bool((c[idx >> 6] >> (idx & 63)) & 1);
+          });
+          if (got != want) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "reach check failed: k=%d y=%" PRIx64 " x=%" PRIx64 " a=%" PRIx64 " plane=%d kernel=%d rules=%d", k + 1, y, x, a, i, int(got), int(want));
+            Die(buf);
+          }
+          cx.checked->fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      CompactBits<false>(o, k + 1, dst + u64(i) * gout.stride);
+    }
+    (void)out_words;
+    ReachStats st;
+    CountSlab(dst, gout.stride, yi, nullptr, &st);
+    std::lock_guard<std::mutex> l(local);
+    out_st.Add(st);
+  });
+  RowDone(&in_st, yi);
+  RowDone(&out_st, yi);
+  std::lock_guard<std::mutex> l(*cx.m);
+  cx.in_stats->Add(in_st);
+  cx.out_stats->Add(out_st);
+}
+
+// Layer 0: plane i of p is [r_i p is a start].
+void SeedClass(int c, char* outbuf, ReachStats* st) {
+  const Geom g = GeomOf(0, g_planes);
+  const u64 rb = g_class_begin[size_t(c)], re = g_class_begin[size_t(c) + 1];
+  for (u64 yi = rb; yi < re; ++yi) {
+    const u64 y = g_rows[yi], rest = ~y & BOARD;
+    ReachStats row;
+    for (u64 j = 0; j < SPR; ++j) {
+      const u64 x = _pdep_u64(g_qsub[j], rest);
+      u64* dst = reinterpret_cast<u64*>(outbuf + ((yi - rb) * SPR + j) * g.slab_bytes);
+      for (const SeedSet& s : g_seeds) {
+        for (size_t i = 0; i < s.reps.size(); ++i) {
+          const u64 ym = Transform(s.reps[i], y), xo = Transform(s.reps[i], x);
+          bool hit = false;
+          for (const auto& [m, o] : s.starts) hit = hit || (m == ym && o == xo);
+          dst[size_t(s.first) + i] = hit ? 1 : 0;
+        }
+      }
+      CountSlab(dst, g.stride, yi, nullptr, &row);
+    }
+    RowDone(&row, yi);
+    st->Add(row);
+  }
+}
+
+// Every tile of one class file, decompressed; base[d] is where tile d starts.
+void ReadClassWhole(const LayerFiles& lf, int c, char* buf, const std::vector<u64>& base, TaskPool& aux) {
+  const Geom g = GeomOf(lf.k, lf.planes);
+  const ClassIndex& ci = lf.cls[size_t(c)];
+  std::vector<char> comp(ci.data_bytes);
+  const std::string what = "solved layer " + std::to_string(lf.k) + " class " + std::to_string(c);
+  ReadAllAt(lf.fds[size_t(c)], comp.data(), ci.data_bytes, 0, what);
+  ::posix_fadvise(lf.fds[size_t(c)], 0, 0, POSIX_FADV_DONTNEED);
+  g_io.read_bytes.fetch_add(ci.data_bytes);
+  Latch latch;
+  for (int d = 0; d < D; ++d) {
+    const u64 slabs = g_tile_slabs[size_t(c) * size_t(D) + size_t(d)];
+    u64 at = ci.tile_off[size_t(d)];
+    const auto& fl = ci.frame_len[size_t(d)];
+    for (size_t f = 0; f < fl.size(); ++f) {
+      const u64 first = u64(f) * g.chunk_slabs, count = std::min(slabs - first, g.chunk_slabs);
+      char* dst = buf + base[size_t(d)] + first * g.slab_bytes;
+      const char* src = comp.data() + at;
+      const size_t len = fl[f];
+      at += len;
+      latch.Add();
+      aux.Submit([=, &latch, &what] {
+        DecompressFrame(dst, count * g.slab_bytes, src, len, what);
+        latch.Done();
+      });
+    }
+  }
+  latch.Wait();
+}
+
+std::string StatsLine(int k, const char* side, const ReachStats& st) {
+  std::string s = std::to_string(k) + "," + side;
+  for (const u64 v : st.v) s += "," + std::to_string(v);
+  return s;
+}
+
+void AppendLine(const std::string& path, const std::string& line) {
+  FILE* f = std::fopen(path.c_str(), "a");
+  if (!f) Die("cannot write " + path);
+  std::fprintf(f, "%s\n", line.c_str());
+  std::fflush(f);
+  ::fsync(fileno(f));
+  std::fclose(f);
+}
+
+void PrintStats(int k, const char* side, ReachStats st) {
+  std::printf("  %3d %-4s", k, side);
+  for (size_t s = 0; s < g_seeds.size(); ++s) std::printf(" %s=%" PRIu64 " (closure %" PRIu64 ")", g_seeds[s].name.c_str(), st.raw(s), st.closure(s));
+  std::printf(" union=%" PRIu64, st.all());
+  if (side[0] == 'i' && st.all_loss()) {
+    for (size_t s = 0; s < g_seeds.size(); ++s) std::printf(" %s_wins=%" PRIu64, g_seeds[s].name.c_str(), st.wins(s));
+    std::printf(" union_losses=%" PRIu64, st.all_loss());
+  }
+  std::printf("\n");
+}
+
+void WriteStoreConfig(const std::string& root, const char* kind) {
+  const std::string path = root + "/config.txt";
+  if (FileExists(path)) return;
+  FILE* f = std::fopen(path.c_str(), "w");
+  if (!f) Die("cannot write " + path);
+  std::fprintf(f, "board %dx%d\nqueens %d\nclasses %d\ncanon %s\nlevel %d\nchunk_raw %" PRIu64 "\nkind %s\nplanes %d\n", W, H, Q, D, g_canon_max ? "max" : "min", g_level, kChunkRaw, kind,
+               std::string(kind) == "reach" ? g_planes : 1);
+  for (const SeedSet& s : g_seeds) {
+    std::fprintf(f, "seeds %s h=", s.name.c_str());
+    for (const int e : s.h) std::fprintf(f, "%d", e);
+    std::fprintf(f, " reps=");
+    for (const int e : s.reps) std::fprintf(f, "%d", e);
+    std::fprintf(f, "\n");
+  }
+  std::fclose(f);
+}
+
+int ReadClassesFromConfig(const std::string& root) {
+  std::ifstream in(root + "/config.txt");
+  if (!in) Die("no config.txt in " + root);
+  std::string key, val;
+  int d = 0;
+  while (in >> key >> val) {
+    if (key == "classes") d = std::atoi(val.c_str());
+    if (key == "canon") g_canon_max = val == "max";
+    if (key == "queens" && std::atoi(val.c_str()) != Q) Die("queens differ in " + root);
+  }
+  if (d <= 0) Die("bad config.txt in " + root);
+  return d;
+}
+
+int CmdReach(int kmax, int aux_threads, int check_every, double mem_gib, int pkg_level, bool brute, bool plan_only) {
+  if (!g_wroots.empty()) {
+    D = ReadClassesFromConfig(g_wroots[0]);
+  }
+  BuildRows();
+  BuildArrowRanks();
+  InitLaneMasks();
+  const u64 rows = g_rows.size();
+  double peak_bytes = 0;
+  // A store slab holds g_planes bit vectors, so a layer is g_planes times one solved layer.
+  for (int k = 0; k <= F; ++k) peak_bytes = std::max(peak_bytes, double(rows * SPR * StrideWords(k)) * 8 * g_planes);
+  if (D <= 0) D = int(std::clamp<double>(std::ceil(peak_bytes / (16 * kGiB)), 1.0, 256.0));
+  BuildTiles();
+  if (!g_proots.empty()) {
+    Pkg p;
+    p.roots = g_proots;
+    g_pkgs.insert(g_pkgs.begin(), p);
+  }
+  if (!plan_only) {
+    for (const auto& r : g_roots) MkdirP(r);
+    WriteStoreConfig(g_roots[0], "reach");
+  }
+  for (const Pkg& p : g_pkgs) {
+    if (plan_only) break;
+    for (const auto& r : p.roots) MkdirP(r);
+    WriteStoreConfig(p.roots[0], "masked");
+    // Which boards the package answers: a seed set of one start answers its own board.
+    const std::string cfg = p.roots[0] + "/config.txt";
+    std::ifstream in(cfg);
+    std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (all.find("\nanswers ") == std::string::npos) {
+      std::string answers = std::to_string(W) + "x" + std::to_string(H) + "," + std::to_string(H) + "x" + std::to_string(W);
+      if (p.seed >= 0 && g_seeds[size_t(p.seed)].name == "std") answers = std::to_string(W) + "x" + std::to_string(H);
+      if (p.seed >= 0 && g_seeds[size_t(p.seed)].name == "tr") answers = std::to_string(H) + "x" + std::to_string(W);
+      AppendLine(cfg, "answers " + answers);
+    }
+  }
+  std::printf("# reach %dx%d q=%d free=%d group=%d rows=%" PRIu64 " classes=%d planes=%d\n", W, H, Q, F, GN, rows, D, g_planes);
+  for (const SeedSet& s : g_seeds) {
+    std::printf("#   seeds %s: %zu start(s), subgroup of %zu, %zu plane(s)\n", s.name.c_str(), s.starts.size(), s.h.size(), s.reps.size());
+  }
+  for (const auto& r : g_roots) std::printf("# reach root %s: %.0f GiB free\n", r.c_str(), double(FreeBytes(r)) / kGiB);
+  for (const auto& r : g_wroots) std::printf("# solved root %s\n", r.c_str());
+  for (const Pkg& p : g_pkgs) {
+    for (const auto& r : p.roots) std::printf("# package (%s) root %s: %.0f GiB free\n", p.seed < 0 ? "all seeds" : p.seed_name.c_str(), r.c_str(), double(FreeBytes(r)) / kGiB);
+  }
+  if (!g_wroots.empty() && g_pkgs.empty()) Die("--w-root needs --pkg-root or --pkg");
+
+  // Layer F is masked by no step.  The package does not need it: every position there is lost.
+  TaskPool aux(aux_threads);
+  const std::string prog = g_roots[0] + "/reach_progress.csv";
+  const std::string cls_path = g_roots[0] + "/reach_classes.csv";
+  // Finished steps, and the output counts of the last one for the cross-check.
+  int kstart = 0;
+  std::vector<ReachStats> out_of(size_t(F) + 2), in_of(size_t(F) + 2);
+  {
+    std::ifstream in(prog);
+    std::string line;
+    while (std::getline(in, line)) {
+      std::stringstream ss(line);
+      std::string part;
+      std::vector<std::string> f;
+      while (std::getline(ss, part, ',')) f.push_back(part);
+      if (f.size() != 2 + ReachStats().v.size()) continue;
+      const int k = std::atoi(f[0].c_str());
+      ReachStats st;
+      for (size_t i = 0; i < st.v.size(); ++i) st.v[i] = std::strtoull(f[2 + i].c_str(), nullptr, 10);
+      if (f[1] == "out") out_of[size_t(k)] = st, kstart = std::max(kstart, k);
+      if (f[1] == "in") in_of[size_t(k)] = st;
+    }
+  }
+  if (kstart > 0) std::printf("# resuming at step %d -> %d\n", kstart, kstart + 1);
+  const int klast = std::min(kmax, F);
+
+  // Layer 0.
+  if (kstart == 0 && !plan_only) {
+    LayerFiles l0;
+    l0.planes = g_planes;
+    l0.Load(0);
+    ReachStats st0;
+    const Geom g = GeomOf(0, g_planes);
+    u64 max_rows = 0;
+    for (int c = 0; c < D; ++c) max_rows = std::max(max_rows, g_class_begin[size_t(c) + 1] - g_class_begin[size_t(c)]);
+    std::vector<char> buf(max_rows * SPR * g.slab_bytes);
+    for (int c = 0; c < D; ++c) {
+      ReachStats sc;
+      SeedClass(c, buf.data(), &sc);
+      st0.Add(sc);
+      if (!l0.cls[size_t(c)].present) {
+        ClassIndex ci;
+        WriteClass(0, c, buf.data(), 0, aux, &ci, g_roots, g_planes, false, g_level);
+      }
+    }
+    out_of[0] = st0;
+    AppendLine(prog, StatsLine(0, "out", st0));
+    PrintStats(0, "out", st0);
+  }
+
+  for (int k = kstart; k < klast; ++k) {
+    const double t0 = Now();
+    g_lc.Set(k);
+    g_lq.Set(k);
+    {
+      std::vector<std::thread> clear;
+      for (auto& w : g_workers) clear.emplace_back([&w] { w->ClearTables(); });
+      for (auto& t : clear) t.join();
+    }
+    LayerFiles rin, rout, wl;
+    std::vector<LayerFiles> pouts(g_pkgs.size());
+    rin.planes = rout.planes = g_planes;
+    wl.roots = &g_wroots;
+    for (size_t pi = 0; pi < g_pkgs.size(); ++pi) pouts[pi].roots = &g_pkgs[pi].roots;
+    rin.Load(k);
+    if (!plan_only && !rin.Complete()) Die("reach layer " + std::to_string(k) + " is incomplete");
+    if (!plan_only) rin.Open();
+    rout.Load(k + 1);
+    bool mask = false;
+    if (!g_wroots.empty()) {
+      wl.Load(k);
+      bool any = false;
+      for (const auto& c : wl.cls) any = any || c.present;
+      if (any && !wl.Complete()) Die("solved layer " + std::to_string(k) + " is incomplete");
+      mask = any;
+      if (mask) {
+        wl.Open();
+        for (auto& po : pouts) po.Load(k);
+      }
+    }
+    // Per-class counts survive a restart in reach_classes.csv.
+    ReachStats in_st, out_st;
+    std::vector<bool> counted(size_t(D), false);
+    {
+      std::ifstream in(cls_path);
+      std::string line;
+      while (std::getline(in, line)) {
+        std::stringstream ss(line);
+        std::string part;
+        std::vector<std::string> f;
+        while (std::getline(ss, part, ',')) f.push_back(part);
+        if (f.size() != 2 + 2 * ReachStats().v.size() || std::atoi(f[0].c_str()) != k) continue;
+        const int c = std::atoi(f[1].c_str());
+        if (counted[size_t(c)]) continue;
+        counted[size_t(c)] = true;
+        ReachStats a, b;
+        for (size_t i = 0; i < a.v.size(); ++i) a.v[i] = std::strtoull(f[2 + i].c_str(), nullptr, 10);
+        for (size_t i = 0; i < b.v.size(); ++i) b.v[i] = std::strtoull(f[2 + a.v.size() + i].c_str(), nullptr, 10);
+        in_st.Add(a);
+        out_st.Add(b);
+      }
+    }
+    // Counts are recorded after both files, so a class with counts is complete.  Files
+    // without counts are recomputed and overwritten.
+    std::vector<int> todo;
+    for (int c = 0; c < D; ++c) {
+      if (!counted[size_t(c)]) {
+        todo.push_back(c);
+      } else if (!rout.cls[size_t(c)].present || (mask && std::any_of(pouts.begin(), pouts.end(), [c](const LayerFiles& po) { return !po.cls[size_t(c)].present; }))) {
+        Die("class " + std::to_string(c) + " of step " + std::to_string(k) + " has counts but its files are gone");
+      }
+    }
+    if (todo.size() < size_t(D)) std::printf("#   step %d: %zu of %d classes already done\n", k, size_t(D) - todo.size(), D);
+
+    const Geom gin = GeomOf(k, g_planes), gout = GeomOf(k + 1, g_planes), gw = GeomOf(k, 1);
+    u64 max_in = 0, max_rows = 0, max_w = 0;
+    std::vector<std::vector<u64>> in_base(static_cast<size_t>(D)), w_base(static_cast<size_t>(D));
+    for (int d = 0; d < D; ++d) {
+      auto& b = in_base[size_t(d)];
+      b.resize(size_t(D) + 1);
+      u64 at = 0;
+      for (int c = 0; c < D; ++c) {
+        b[size_t(c)] = at;
+        at += g_tile_slabs[size_t(c) * size_t(D) + size_t(d)] * gin.slab_bytes;
+      }
+      b[size_t(D)] = at;
+      max_in = std::max(max_in, at);
+      // Tiles of class file d (for the solved layer): tile e starts at w_base[d][e].
+      auto& wb = w_base[size_t(d)];
+      wb.resize(size_t(D) + 1);
+      at = 0;
+      for (int e = 0; e < D; ++e) {
+        wb[size_t(e)] = at;
+        at += g_tile_slabs[size_t(d) * size_t(D) + size_t(e)] * gw.slab_bytes;
+      }
+      wb[size_t(D)] = at;
+      max_w = std::max(max_w, at);
+    }
+    for (int c = 0; c < D; ++c) max_rows = std::max(max_rows, g_class_begin[size_t(c) + 1] - g_class_begin[size_t(c)]);
+    const size_t npkg = mask ? g_pkgs.size() : 0;
+    const u64 out_bytes = max_rows * SPR * gout.slab_bytes, pkg_bytes = max_rows * SPR * gw.slab_bytes * npkg;
+    if (!mask) max_w = 0;
+    // Double buffers while they fit in the budget: output first, then input.
+    const double single = double(max_in + out_bytes + max_w + pkg_bytes);
+    const bool two_out = D > 1 && single + double(out_bytes + pkg_bytes) <= mem_gib * kGiB;
+    const bool two_in = D > 1 && single + double(two_out ? out_bytes + pkg_bytes : 0) + double(max_in + max_w) <= mem_gib * kGiB;
+    {
+      const double total = single + double(two_out ? out_bytes + pkg_bytes : 0) + double(two_in ? max_in + max_w : 0);
+      std::printf("#   step %d buffers: in %.1f GiB, solved %.1f GiB, out %.1f GiB, pkg %.1f GiB; %s input, %s output; %.1f GiB in all (budget %.0f)\n", k,
+                  double(max_in) / kGiB, double(max_w) / kGiB, double(out_bytes) / kGiB, double(pkg_bytes) / kGiB, two_in ? "double" : "single",
+                  two_out ? "double" : "single", total / kGiB, mem_gib);
+      std::fflush(stdout);
+    }
+    if (plan_only) continue;
+    char* in_slot[2] = {BigAlloc<char>(max_in), two_in ? BigAlloc<char>(max_in) : nullptr};
+    char* w_slot[2] = {max_w ? BigAlloc<char>(max_w) : nullptr, (two_in && max_w) ? BigAlloc<char>(max_w) : nullptr};
+    char* out_slot[2] = {BigAlloc<char>(out_bytes), two_out ? BigAlloc<char>(out_bytes) : nullptr};
+    char* pkg_slot[2] = {pkg_bytes ? BigAlloc<char>(pkg_bytes) : nullptr, (two_out && pkg_bytes) ? BigAlloc<char>(pkg_bytes) : nullptr};
+    const u64 one_pkg = max_rows * SPR * gw.slab_bytes;
+
+    std::thread reader, writer;
+    int reading_class = -1;
+    auto start_read = [&](int d, int slot) {
+      reading_class = d;
+      char* is = in_slot[slot];
+      char* ws = w_slot[slot];
+      reader = std::thread([&rin, &wl, d, is, ws, mask, &in_base, &w_base, &aux] {
+        ReadRows(rin, d, is, in_base[size_t(d)], aux);
+        if (mask) ReadClassWhole(wl, d, ws, w_base[size_t(d)], aux);
+      });
+    };
+    std::mutex m;
+    std::atomic<u64> checked{0};
+    double in_wait = 0, out_wait = 0, last_report = Now();
+    int cur_in = 0, cur_out = 0;
+    const size_t chunk = WORDS >= 512 ? 1 : (WORDS >= 64 ? 8 : 64);
+    for (size_t ti = 0; ti < todo.size(); ++ti) {
+      const int c = todo[ti];
+      const double tw0 = Now();
+      if (reading_class != c) {
+        if (reader.joinable()) reader.join();
+        start_read(c, cur_in);
+      }
+      reader.join();
+      reading_class = -1;
+      if (two_in && ti + 1 < todo.size()) start_read(todo[ti + 1], cur_in ^ 1);
+      in_wait += Now() - tw0;
+      ReachStats cin, cout;
+      ReachContext cx;
+      cx.k = k;
+      cx.inbuf = in_slot[cur_in];
+      cx.in_base = &in_base[size_t(c)];
+      cx.outbuf = out_slot[cur_out];
+      if (mask) {
+        cx.wbuf = w_slot[cur_in];
+        cx.w_base = &w_base[size_t(c)];
+        for (size_t pi = 0; pi < npkg; ++pi) cx.pkgbufs.push_back(pkg_slot[cur_out] + pi * one_pkg);
+      }
+      cx.class_begin = g_class_begin[size_t(c)];
+      cx.check_every = check_every;
+      cx.m = &m;
+      cx.in_stats = &cin;
+      cx.out_stats = &cout;
+      cx.checked = &checked;
+      cx.brute = brute;
+      const u64 rb = g_class_begin[size_t(c)], re = g_class_begin[size_t(c) + 1];
+      std::atomic<u64> next_row{rb};
+      std::vector<std::thread> drivers;
+      for (auto& wp : g_workers) {
+        Worker* w = wp.get();
+        drivers.emplace_back([w, &next_row, re, &cx, chunk] {
+          PinCaller(w->pool->cpu0());
+          for (;;) {
+            const u64 y = next_row.fetch_add(1);
+            if (y >= re) break;
+            ProcessReachRow(*w, y, cx, chunk);
+          }
+        });
+      }
+      for (auto& t : drivers) t.join();
+      const double tw1 = Now();
+      if (writer.joinable()) writer.join();
+      out_wait += Now() - tw1;
+      char* ob = out_slot[cur_out];
+      char* pb = pkg_slot[cur_out];
+      auto write = [k, c, ob, pb, npkg, one_pkg, cin, cout, &aux, &cls_path, pkg_level]() mutable {
+        ClassIndex ri, pi;
+        WriteClass(k + 1, c, ob, 0, aux, &ri, g_roots, g_planes, false, g_level);
+        for (size_t p = 0; p < npkg; ++p) WriteClass(k, c, pb + p * one_pkg, cin.all_loss(), aux, &pi, g_pkgs[p].roots, 1, false, pkg_level);
+        AppendLine(cls_path, std::to_string(k) + "," + std::to_string(c) + "," + StatsLine(0, "x", cin).substr(4) + "," + StatsLine(0, "x", cout).substr(4));
+      };
+      in_st.Add(cin);
+      out_st.Add(cout);
+      if (two_out) writer = std::thread(write);
+      else write();
+      cur_out ^= int(two_out);
+      cur_in ^= int(two_in);
+      if (Now() - last_report > 60) {
+        last_report = Now();
+        const double el = Now() - t0;
+        std::printf("#   step %d: class %zu/%zu, %.0fs in step, about %.0fs left\n", k, ti + 1, todo.size(), el, el / double(ti + 1) * double(todo.size() - ti - 1));
+      }
+    }
+    if (reader.joinable()) reader.join();
+    if (writer.joinable()) writer.join();
+    BigFree(in_slot[0], max_in);
+    BigFree(in_slot[1], max_in);
+    BigFree(w_slot[0], max_w);
+    BigFree(w_slot[1], max_w);
+    BigFree(out_slot[0], out_bytes);
+    BigFree(out_slot[1], out_bytes);
+    BigFree(pkg_slot[0], pkg_bytes);
+    BigFree(pkg_slot[1], pkg_bytes);
+    // Layer k counted from its own columns and again from the gathered rows.
+    ReachStats a = out_of[size_t(k)], b = in_st;
+    for (size_t s = 0; s < g_seeds.size(); ++s) {
+      if (a.raw(s) != b.raw(s) || a.closure(s) != b.closure(s)) Die("layer " + std::to_string(k) + " counts differ between columns and rows for " + g_seeds[s].name);
+    }
+    if (a.all() != b.all()) Die("layer " + std::to_string(k) + " union counts differ between columns and rows");
+    rin.Close();
+    if (mask) wl.Close();
+    AppendLine(prog, StatsLine(k, "in", in_st));
+    AppendLine(prog, StatsLine(k + 1, "out", out_st));
+    out_of[size_t(k) + 1] = out_st;
+    PrintStats(k, "in", in_st);
+    PrintStats(k + 1, "out", out_st);
+    std::printf("#   step %d -> %d: %.1fs, in_wait %.1fs, out_wait %.1fs%s%s\n", k, k + 1, Now() - t0, in_wait, out_wait, two_in ? "" : ", single input buffer", two_out ? "" : ", single output buffer");
+    if (checked.load()) std::printf("#   k=%d: %" PRIu64 " reach bits rechecked from the rules, no mismatch\n", k + 1, checked.load());
+    DeleteLayer(k, g_roots);
+  }
+  std::printf("# totals over layers 0..%d:\n", klast);
+  ReachStats tot;
+  for (int k = 0; k <= klast; ++k) tot.Add(out_of[size_t(k)]);
+  PrintStats(klast, "sum", tot);
+  {
+    std::lock_guard<std::mutex> lk(g_io.m);
+    std::printf("# io: read %.2f GiB, written %.2f GiB\n", double(g_io.read_bytes.load()) / kGiB, double(g_io.written_bytes.load()) / kGiB);
+  }
+  std::printf("# done %.1fs\n", Now());
+  return 0;
+}
+
 // ------------------------------------------------------------------ probe
 
 // The stored solution of a finished run, including layers that were dropped.
 class Oracle {
  public:
-  Oracle() {
+  explicit Oracle(const std::vector<std::string>& roots = g_roots) : roots_(roots) {
     // The class count is part of the file format, so take it from the run's own record.
-    const std::string cfg = g_roots[0] + "/config.txt";
+    const std::string cfg = roots_[0] + "/config.txt";
     std::ifstream in(cfg);
-    if (!in) Die("no config.txt in " + g_roots[0]);
+    if (!in) Die("no config.txt in " + roots_[0]);
     std::string key, val;
     D = 0;
     while (in >> key >> val) {
@@ -2628,6 +3545,7 @@ class Oracle {
     auto it = readers_.find(layer);
     if (it != readers_.end()) return it->second.get();
     auto lf = std::make_unique<LayerFiles>();
+    lf->roots = &roots_;
     lf->Load(layer);
     if (!lf->Complete()) {
       readers_[layer] = nullptr;
@@ -2651,12 +3569,9 @@ class Oracle {
   }
 
  private:
+  std::vector<std::string> roots_;
   std::unordered_map<int, std::unique_ptr<LayerFiles>> files_;
   std::unordered_map<int, std::unique_ptr<SlabReader>> readers_;
-};
-
-struct Move {
-  int f, t, s;
 };
 
 std::vector<Move> LegalMoves(u64 m, u64 o, u64 a) {
@@ -2767,6 +3682,44 @@ int CmdPlayout(int games, int sample) {
     std::printf("game %d (%s setup): %s, %d plies\n", game, (two_roots && (game & 1)) ? "transposed" : "standard", root_loss ? "second player won" : "first player won", ply);
   }
   std::printf("playout: %d games, %" PRIu64 " plies, %" PRIu64 " child values checked, no contradiction\n", games, plies, children);
+  return 0;
+}
+
+// Random games from both standard starts, every move uniformly at random, comparing a
+// masked store (--pkg-root) with the full one (--root) at every ply.
+int CmdPkgCheck(int games) {
+  Oracle full(g_roots), pkg(g_proots);
+  bool std_ok = true, tr_ok = W != H;
+  {
+    std::ifstream in(g_proots[0] + "/config.txt");
+    std::string key, val;
+    while (in >> key >> val) {
+      if (key == "answers") {
+        const std::string b = std::to_string(W) + "x" + std::to_string(H), t = std::to_string(H) + "x" + std::to_string(W);
+        std_ok = (',' + val + ',').find(',' + b + ',') != std::string::npos;
+        tr_ok = W != H && (',' + val + ',').find(',' + t + ',') != std::string::npos;
+      }
+    }
+  }
+  std::mt19937_64 rng(20261105);
+  u64 plies = 0;
+  for (int game = 0; game < games; ++game) {
+    u64 m, o, a = 0;
+    if (tr_ok && (!std_ok || (game & 1))) StartPositionTransposed(&m, &o);
+    else StartPosition(&m, &o);
+    for (;;) {
+      if (full.Loss(m, o, a) != pkg.Loss(m, o, a)) Die("masked store differs at a reachable position, game " + std::to_string(game));
+      ++plies;
+      std::vector<Move> moves = LegalMoves(m, o, a);
+      if (moves.empty()) break;
+      const Move& v = moves[rng() % moves.size()];
+      const u64 moved = (m & ~(u64(1) << v.f)) | (u64(1) << v.t);
+      a |= u64(1) << v.s;
+      m = o;
+      o = moved;
+    }
+  }
+  std::printf("pkgcheck: %d games, %" PRIu64 " positions, masked and full stores agree\n", games, plies);
   return 0;
 }
 
@@ -2963,7 +3916,7 @@ int main(int argc, char** argv) {
   }
   const std::string cmd = argv[1];
   if (cmd == "selftest") return CmdSelfTest();
-  if ((cmd != "solve" && cmd != "bench" && cmd != "probe" && cmd != "playout") || argc < 3) {
+  if ((cmd != "solve" && cmd != "bench" && cmd != "probe" && cmd != "playout" && cmd != "reach" && cmd != "pkgcheck") || argc < 3) {
     std::fputs(usage, stderr);
     return 2;
   }
@@ -2972,7 +3925,10 @@ int main(int argc, char** argv) {
   bool list_moves = false;
   int games = 20, sample = 16;
   if (std::sscanf(argv[2], "%dx%d", &w, &h) != 2) Die("bad board");
-  std::string compare, pm, po, pa;
+  std::string compare, pm, po, pa, seeds = "std:stab,tr:stab", start_m, start_o;
+  int kmax = 1 << 20, pkg_level = 9;
+  double mem_gib = 450;
+  bool brute = false, plan_only = false;
   D = 0;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
@@ -3011,19 +3967,96 @@ int main(int argc, char** argv) {
     else if (a == "--moves") list_moves = true;
     else if (a == "--games") games = std::atoi(val());
     else if (a == "--sample") sample = std::atoi(val());
+    else if (a == "--w-root") g_wroots.push_back(val());
+    else if (a == "--pkg-root") g_proots.push_back(val());
+    else if (a == "--pkg") {
+      // SEED=DIR: a package masked to one seed set; repeat for more roots or packages
+      const std::string v = val();
+      const size_t eq = v.find('=');
+      if (eq == std::string::npos) Die("--pkg takes SEED=DIR");
+      Pkg p;
+      p.seed_name = v.substr(0, eq);
+      p.roots.push_back(v.substr(eq + 1));
+      bool merged = false;
+      for (Pkg& q : g_pkgs) {
+        if (q.seed_name == p.seed_name) q.roots.push_back(p.roots[0]), merged = true;
+      }
+      if (!merged) g_pkgs.push_back(p);
+    }
+    else if (a == "--seeds") seeds = val();
+    else if (a == "--start-m") start_m = val();
+    else if (a == "--start-o") start_o = val();
+    else if (a == "--kmax") kmax = std::atoi(val());
+    else if (a == "--mem-gib") mem_gib = std::atof(val());
+    else if (a == "--pkg-level") pkg_level = std::atoi(val());
+    else if (a == "--brute-check") brute = true;
+    else if (a == "--plan") plan_only = true;
     else Die("unknown option " + a);
   }
   InitBoard(w, h, q);
-  if (cmd == "probe" || cmd == "playout") {
+  if (cmd == "probe" || cmd == "playout" || cmd == "pkgcheck") {
     if (g_roots.empty()) Die(cmd + " needs --root");
     if (cmd == "playout") return CmdPlayout(games, sample);
+    if (cmd == "pkgcheck") {
+      if (g_proots.empty()) Die("pkgcheck needs --pkg-root");
+      return CmdPkgCheck(games);
+    }
     return CmdProbe(pm, po, pa, list_moves);
   }
   if (cmd == "bench") {
     InitWorkers(threads, workers);
     return CmdBench(bench_k < 0 ? F / 2 : bench_k, bench_rows);
   }
-  if (g_roots.empty()) Die("solve needs --root");
+  if (g_roots.empty()) Die(cmd + " needs --root");
+  if (cmd == "reach") {
+    // Seed sets: std, tr (the HxW start on this board), both, or custom (--start-m/--start-o),
+    // each :stab (planes for the start's own symmetry) or :closure (one plane, closed under G).
+    std::stringstream ss(seeds);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+      const size_t colon = tok.find(':');
+      const std::string what = tok.substr(0, colon), how = colon == std::string::npos ? "stab" : tok.substr(colon + 1);
+      SeedSet st;
+      st.name = what + (how == "closure" ? "_closure" : "");
+      u64 m, o;
+      if (what == "std" || what == "both") {
+        if (Q != 4 || std::min(W, H) < 4) Die("the standard start needs 4 queens and a board of at least 4x4");
+        StartPosition(&m, &o);
+        st.starts.push_back({m, o});
+      }
+      if (what == "tr" || what == "both") {
+        if (Q != 4 || std::min(W, H) < 4) Die("the standard start needs 4 queens and a board of at least 4x4");
+        StartPositionTransposed(&m, &o);
+        st.starts.push_back({m, o});
+      }
+      if (what == "custom") {
+        m = CellsToMask(start_m), o = CellsToMask(start_o);
+        if (__builtin_popcountll(m) != Q || __builtin_popcountll(o) != Q || (m & o)) Die("bad --start-m/--start-o");
+        st.starts.push_back({m, o});
+      }
+      if (st.starts.empty()) Die("unknown seed set " + what);
+      if (how == "closure") {
+        for (int g = 0; g < GN; ++g) st.h.push_back(g);
+      } else if (how != "stab") {
+        Die("seed sets are :stab or :closure");
+      }
+      g_seeds.push_back(st);
+    }
+    BuildSeedSets();
+    for (Pkg& p : g_pkgs) {
+      for (size_t si = 0; si < g_seeds.size(); ++si) {
+        if (g_seeds[si].name == p.seed_name) p.seed = int(si);
+      }
+      if (p.seed < 0) Die("--pkg names no seed set: " + p.seed_name);
+    }
+    InitWorkers(threads, workers, g_planes, false);
+    MoveCallerToSecondaryThreads();
+    if (aux <= 0) {
+      for (const auto& list : ReadTopology().secondary) aux += int(list.size());
+      aux = std::max(aux, 4);
+    }
+    return CmdReach(kmax, aux, check_every, mem_gib, pkg_level, brute, plan_only);
+  }
   InitWorkers(threads, workers);
   MoveCallerToSecondaryThreads();
   if (aux <= 0) {

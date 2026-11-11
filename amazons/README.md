@@ -105,8 +105,8 @@ DB, pn-init, move ordering on).  "nodes" = SearchImpl invocations.
 Each table holds the value of **every** placement of 4+4 queens with any set of arrows, so
 it covers both orientations of the board and any starting setup. Counts below are raw
 positions, not reduced by symmetry; the stored tables are about 4 times smaller in
-classes. Reachable-from-start counts were not measured for these boards (on 5x5 about half
-of the central layers is reachable, so restricting to them would not help).
+classes. How many of them a game from the standard start can reach is in "Reachable
+positions and WDL packages" below.
 
 | board | result | winning first moves | positions in table | wins | losses | compute | kept on disk |
 |-------|--------|--------------------:|-------------------:|-----:|-------:|--------:|-------------:|
@@ -126,6 +126,51 @@ replies to 5x6's B1-B4xD4; the table finds the same 157, all losing). Every run 
 sample of every layer from the rules, and 4x7 and 5x6 were also checked by 200 games of
 `slabsolve playout` from both orientations. How the solver works, and the numbers behind
 these, are in [dfa/README.md](dfa/README.md) and [dfa/PLAN.md](dfa/PLAN.md).
+
+### Reachable positions and WDL packages
+
+`slabsolve reach` runs the same kernel forwards from the standard start of each board and
+counts, exactly and layer by layer, the positions a game can reach. A position here is the
+board plus the side to move, not reduced by symmetry; the side to move follows from the ply,
+which equals the number of arrows. "Share of table" compares the count with the table's
+positions for that board.
+
+| board | reachable from the standard start | share of table | plies | largest ply |
+|-------|----------------------------------:|---------------:|------:|------------:|
+| 4x4 | 9,795,829 | 4.2% | 0–8 | 6: 3,951,139 |
+| 4x5 | 7,698,154,775 | 21.3% | 0–12 | 8: 2,594,294,364 |
+| 5x4 | 7,818,592,435 | 21.6% | 0–12 | 8: 2,650,984,381 |
+| 4x6 | 1,484,795,918,538 | 44.0% | 0–16 | 9: 388,908,747,262 |
+| 6x4 | 1,705,878,553,790 | 50.6% | 0–16 | 9: 457,796,049,534 |
+| 5x5 | 5,148,132,650,920 | 51.9% | 0–17 | 10: 1,359,094,491,250 |
+| 4x7 | 155,233,359,432,071 | 68.0% | 0–20 | 11: 34,696,102,044,884 |
+| 7x4 | 159,881,709,202,133 | 70.1% | 0–20 | 10: 35,406,802,884,934 |
+| 5x6 | 1,374,597,001,683,618 | 80.0% | 0–22 | 11: 272,935,103,378,821 |
+| 6x5 | 1,466,247,186,683,340 | 85.3% | 0–22 | 11: 284,777,950,707,708 |
+
+The share grows with the board, so restricting a solve to reachable positions would not
+save much on these boards. Every layer had a sample of its reach bits rechecked from the
+rules. On 4x5, 5x4 and 4x6 (layers 0 to 10, as far as that run went) the counts closed
+under symmetry equal those of the independent `dense --reach`.
+
+A **WDL package** holds the solved layers masked to the reachable positions, so it answers
+the value of every position a game from the standard start can reach. It comes with a
+standalone query program (`wdl_query.cpp`), a README, per-ply reachable, win and loss counts
+(`STATISTICS.md`, CSV, JSON) and SHA-256 checksums. Plies the package does not store are
+answered by one ply of search. Every package was compared with the full table along 200
+random games from its start (`slabsolve pkgcheck`).
+
+| package | answers | size | root | winning first moves |
+|---------|---------|-----:|------|--------------------:|
+| `amazons-4x7-wdl` | 4x7 | 647 GiB | 1st player win | 22 of 350 |
+| `amazons-7x4-wdl` | 7x4 | 643 GiB | 2nd player win | 0 of 350 |
+| `amazons-5x6-6x5-wdl` | 5x6 and 6x5 | 6.1 TiB | 1st player win on both | 10 and 8 of 410 |
+
+5x6 and 6x5 share one package because two separate ones would not fit on one 8 TB disk.
+It stores every position reachable from either start, and you name the board when querying
+(`wdl_query . 6x5 --moves`). Its statistics count each board from its own start, in
+`5x6-wdl.csv`, `6x5-wdl.csv` and the matching JSON files. Like the tables, the packages are
+too large for git and are kept outside the repository.
 
 **The 4x5 verdict contradicts Table I of the paper** (which lists 4 5 as a
 first-player win).  The exhaustive table says the second player wins, and
