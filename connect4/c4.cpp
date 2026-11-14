@@ -1,4 +1,4 @@
-// c4.cpp — Strong solver for Connect Four (7x6 and smaller) via a per-ply ZDD minimal
+// c4.cpp — Strong solver for Connect Four (up to 7x7) via a per-ply ZDD minimal
 // perfect hash + single-pass backward retrograde analysis, producing a packed 2-bit WDL
 // table. Companion to the NOCCA x NOCCA and Dobutsu Shogi solvers in this repository.
 //
@@ -23,8 +23,13 @@
 // r = stones still needed, rx = X stones still needed); all 43 ply-roots share one node
 // pool because completions depend only on (window, r, rx).
 //
-// WDL semantics: 2-bit value for the SIDE TO MOVE at slab[ply]: 0 = draw, 1 = win,
-// 2 = loss (same convention as the NOCCA / dobutsu tables).
+// WDL semantics: value for the SIDE TO MOVE at slab[ply]: 0 = draw, 1 = win, 2 = loss
+// (same convention as the NOCCA / dobutsu tables). Two slab packings:
+//   2-bit : value i at bits 2*(i%4) of byte i/4; file = ceil(n/32) u64 words (the published
+//           7x6 and smaller tables; the default for W*H <= 42).
+//   base-3: 5 values per byte, byte i/5 = sum v_j * 3^j (j = i%5); file = ceil(n/5) bytes.
+//           20% smaller; the default for W*H > 42. A board directory using it holds a file
+//           named PACK_BASE3; without that file the slabs are 2-bit.
 
 #include <cstdio>
 #include <cstdarg>
@@ -42,9 +47,12 @@
 #include <algorithm>
 #include <array>
 #include <unordered_map>
+#include <mutex>
+#include <condition_variable>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 using u8 = uint8_t;  using u16 = uint16_t; using u32 = uint32_t; using u64 = uint64_t;
@@ -78,13 +86,14 @@ static void* bigalloc(size_t bytes) {
 static int W = 7, H = 6, CELLS = 42;
 static int NS = 127, SB = 7;          // column states, bits per state id
 static int SBITS = 6, XBITS = 5;      // bits for stone counters in DP keys
-static int KEYBITS = 32;
+static int KEYBITS = 32;              // up to 35 bits for 7x7 (keys are u64)
 
 static int BASE[8];
 static std::vector<int> hgt_, pat_, xcnt_;
 static std::vector<u16> cells_;       // 2 bits per row: 0 empty, 1 = O, 2 = X
 static std::vector<u8> valid_;        // no vertical 4-run
 static std::vector<int> validList_;
+static std::vector<int> vidx_;        // state -> index in validList_ (-1 if invalid)
 static u64* win4_ = nullptr;          // bitset [A][B][C][D]: D completes a horiz/diag 4-row
 
 static inline int cellOf(int s, int r) { return (cells_[s] >> (2 * r)) & 3; }
@@ -96,11 +105,12 @@ static void initTables(int w, int h) {
   SBITS = 0; while ((1 << SBITS) <= CELLS) ++SBITS;
   XBITS = 0; while ((1 << XBITS) <= (CELLS + 1) / 2) ++XBITS;
   KEYBITS = 3 * SB + SBITS + XBITS;
-  if (KEYBITS > 32) die("key does not fit in 32 bits for %dx%d", w, h);
+  if (KEYBITS > 40) die("key does not fit for %dx%d", w, h);
   for (int i = 0; i <= 7; ++i) BASE[i] = (1 << i) - 1;
   hgt_.assign(NS, 0); pat_.assign(NS, 0); xcnt_.assign(NS, 0);
   cells_.assign(NS, 0); valid_.assign(NS, 0);
   validList_.clear();
+  vidx_.assign(NS, -1);
   for (int hh = 0; hh <= H; ++hh)
     for (int p = 0; p < (1 << hh); ++p) {
       int s = BASE[hh] + p;
@@ -116,7 +126,7 @@ static void initTables(int w, int h) {
           bad = true;
       }
       valid_[s] = !bad;
-      if (!bad) validList_.push_back(s);
+      if (!bad) { vidx_[s] = (int)validList_.size(); validList_.push_back(s); }
     }
 }
 
@@ -163,56 +173,57 @@ static inline bool win4(int A, int B, int Cc, int D) {
   return (win4_[idx >> 6] >> (idx & 63)) & 1;
 }
 
-// ------------------------------------------------------------------------------------------
-// Forward counting DP over columns. Key at the boundary entering column c:
-//   window (A,B,C) = states of columns c-3,c-2,c-1 (state 0 pad), s' / x' = stones and
-//   X-stones in columns dropped from the window (columns <= c-4).
-// Produces per-ply pseudo counts and (optionally) live-key bitmaps per boundary.
-// ------------------------------------------------------------------------------------------
-static inline u32 keyOf(int A, int B, int Cc, int sp, int xp) {
-  return ((((u32)A << SB | B) << SB | Cc) << SBITS | sp) << XBITS | xp;
+static inline u64 keyOf(int A, int B, int Cc, int sp, int xp) {
+  return ((((u64)A << SB | B) << SB | Cc) << SBITS | sp) << XBITS | xp;
 }
 
+// ------------------------------------------------------------------------------------------
+// Forward counting DP over columns (independent of the ZDD; validates its root counts).
+// Dense state at the boundary entering column c: window (A,B,C) = states of columns
+// c-3,c-2,c-1 (state 0 pad) as indices into validList_, plus s' / x' = stones and X-stones
+// in the columns already dropped from the window (columns <= c-4).
+// 7x7: 191^3 windows x 50 x 26 = 9.06e9 u64 counters = 72.5 GB per array (two arrays).
+// ------------------------------------------------------------------------------------------
 struct CountResult {
   std::vector<u64> perPly;      // pseudo non-terminal positions per ply
   u64 total = 0;
 };
 
 static CountResult countDP(int threads, bool verbose) {
-  size_t KS = (size_t)1 << KEYBITS;
+  const u64 V = validList_.size();
+  const u64 SP = CELLS + 1, XP = (CELLS + 1) / 2 + 1;
+  const u64 WN = V * V * V, KS = WN * SP * XP;
+  if (validList_[0] != 0) die("validList_[0] must be the empty column");
   u64* dp = (u64*)bigalloc(KS * 8);
   u64* dp2 = (u64*)bigalloc(KS * 8);
-  dp[keyOf(0, 0, 0, 0, 0)] = 1;
+  dp[0] = 1;                                     // window (0,0,0), s'=x'=0
   for (int c = 0; c < W; ++c) {
     double t0 = now_s();
-    std::atomic<u64> chunk{0};
-    const u64 CH = 1 << 18;
+    std::atomic<u64> ctr{0};
     std::vector<std::thread> th;
     for (int t = 0; t < threads; ++t)
       th.emplace_back([&] {
         for (;;) {
-          u64 b = chunk.fetch_add(1) * CH;
-          if (b >= KS) break;
-          u64 e = std::min(KS, b + CH);
-          for (u64 key = b; key < e; ++key) {
-            u64 cnt = dp[key];
-            if (!cnt) continue;
-            int xp = key & ((1 << XBITS) - 1);
-            int sp = (key >> XBITS) & ((1 << SBITS) - 1);
-            int Cc = (key >> (XBITS + SBITS)) & (NS ? ((1 << SB) - 1) : 0);
-            int B = (key >> (XBITS + SBITS + SB)) & ((1 << SB) - 1);
-            int A = (key >> (XBITS + SBITS + 2 * SB)) & ((1 << SB) - 1);
-            int sp2 = sp + hgt_[A], xp2 = xp + xcnt_[A];
-            for (int D : validList_) {
-              if (win4(A, B, Cc, D)) continue;
-              u32 nk = keyOf(B, Cc, D, sp2, xp2);
-              __atomic_fetch_add(&dp2[nk], cnt, __ATOMIC_RELAXED);
+          u64 w0 = ctr.fetch_add(1);
+          if (w0 >= WN) break;
+          int a = (int)(w0 / (V * V)), b = (int)(w0 / V % V), cc = (int)(w0 % V);
+          int A = validList_[a], B = validList_[b], Cc = validList_[cc];
+          const u64* src = dp + w0 * SP * XP;
+          for (u64 sp = 0; sp < SP; ++sp)
+            for (u64 xp = 0; xp <= std::min(sp, XP - 1); ++xp) {
+              u64 cnt = src[sp * XP + xp];
+              if (!cnt) continue;
+              u64 sp2 = sp + hgt_[A], xp2 = xp + xcnt_[A];
+              for (u64 d = 0; d < V; ++d) {
+                int D = validList_[d];
+                if (win4(A, B, Cc, D)) continue;
+                u64 nw = ((u64)b * V + cc) * V + d;
+                __atomic_fetch_add(&dp2[(nw * SP + sp2) * XP + xp2], cnt, __ATOMIC_RELAXED);
+              }
             }
-          }
         }
       });
     for (auto& x : th) x.join();
-    // swap and clear
     std::swap(dp, dp2);
     memset(dp2, 0, KS * 8);
     if (verbose) printf("[count] column %d done in %.1fs\n", c, now_s() - t0);
@@ -224,26 +235,22 @@ static CountResult countDP(int threads, bool verbose) {
   {
     std::vector<std::thread> th;
     std::vector<std::vector<u64>> acc(threads, std::vector<u64>(CELLS + 1, 0));
-    std::atomic<u64> chunk{0};
-    const u64 CH = 1 << 18;
+    std::atomic<u64> ctr{0};
     for (int t = 0; t < threads; ++t)
       th.emplace_back([&, t] {
         for (;;) {
-          u64 b = chunk.fetch_add(1) * CH;
-          if (b >= KS) break;
-          u64 e = std::min(KS, b + CH);
-          for (u64 key = b; key < e; ++key) {
-            u64 cnt = dp[key];
-            if (!cnt) continue;
-            int xp = key & ((1 << XBITS) - 1);
-            int sp = (key >> XBITS) & ((1 << SBITS) - 1);
-            int Cc = (key >> (XBITS + SBITS)) & ((1 << SB) - 1);
-            int B = (key >> (XBITS + SBITS + SB)) & ((1 << SB) - 1);
-            int A = (key >> (XBITS + SBITS + 2 * SB)) & ((1 << SB) - 1);
-            int s = sp + hgt_[A] + hgt_[B] + hgt_[Cc];
-            int x = xp + xcnt_[A] + xcnt_[B] + xcnt_[Cc];
-            if (x == (s + 1) / 2) acc[t][s] += cnt;
-          }
+          u64 w0 = ctr.fetch_add(1);
+          if (w0 >= WN) break;
+          int A = validList_[w0 / (V * V)], B = validList_[w0 / V % V], Cc = validList_[w0 % V];
+          const u64* src = dp + w0 * SP * XP;
+          for (u64 sp = 0; sp < SP; ++sp)
+            for (u64 xp = 0; xp < XP; ++xp) {
+              u64 cnt = src[sp * XP + xp];
+              if (!cnt) continue;
+              int s = (int)sp + hgt_[A] + hgt_[B] + hgt_[Cc];
+              int x = (int)xp + xcnt_[A] + xcnt_[B] + xcnt_[Cc];
+              if (x == (s + 1) / 2) acc[t][s] += cnt;
+            }
         }
       });
     for (auto& x : th) x.join();
@@ -333,37 +340,47 @@ struct Pool {
   }
 };
 
-// Open-addressing map u32 key -> u32 node id, parallel insert. Slot: (key+1)<<32 | id.
-struct KeyMap {
-  u64* slots = nullptr; u64 nslots = 0;
-  void alloc(u64 count) {
-    nslots = 4;
-    while (nslots < count * 2) nslots <<= 1;
-    slots = (u64*)bigalloc(nslots * 8);
+// Map live key -> node id, keyed by the forward-liveness bitmap of one column boundary:
+// pre[w] = number of live keys in words < w; ids[pre[w] + popcount(word & below)] = node.
+// Dense, lock-free to fill (each live key has a unique slot), 4 bytes per live key plus
+// 1 byte per 8 keys of key space; dead keys (bit clear) map to the 0-leaf.
+struct LiveRank {
+  u64* bits = nullptr; u64 words = 0;
+  u64* pre = nullptr; u32* ids = nullptr; u64 nlive = 0;
+  void init(u64* bitmap, u64 nwords, int threads) {
+    bits = bitmap; words = nwords;
+    pre = (u64*)bigalloc(words * 8);
+    std::vector<u64> part(threads + 1, 0);
+    u64 per = (words + threads - 1) / threads;
+    std::vector<std::thread> th;
+    for (int t = 0; t < threads; ++t)
+      th.emplace_back([&, t] {
+        u64 b = std::min(words, t * per), e = std::min(words, b + per), c = 0;
+        for (u64 w = b; w < e; ++w) c += __builtin_popcountll(bits[w]);
+        part[t + 1] = c;
+      });
+    for (auto& x : th) x.join();
+    for (int t = 0; t < threads; ++t) part[t + 1] += part[t];
+    nlive = part[threads];
+    th.clear();
+    for (int t = 0; t < threads; ++t)
+      th.emplace_back([&, t] {
+        u64 b = std::min(words, t * per), e = std::min(words, b + per), c = part[t];
+        for (u64 w = b; w < e; ++w) { pre[w] = c; c += __builtin_popcountll(bits[w]); }
+      });
+    for (auto& x : th) x.join();
+    ids = (u32*)bigalloc(std::max<u64>(nlive, 1) * 4);
   }
-  void free_() { if (slots) munmap(slots, nslots * 8); slots = nullptr; }
-  inline void insert(u32 key, u32 id) {
-    u64 ent = ((u64)key + 1) << 32 | id;
-    u64 hsh = (u64)key * 0x9E3779B97F4A7C15ull;
-    for (u64 i = (hsh ^ (hsh >> 31)) & (nslots - 1);; i = (i + 1) & (nslots - 1)) {
-      u64 cur = __atomic_load_n(&slots[i], __ATOMIC_RELAXED);
-      if (cur == 0) {
-        u64 exp = 0;
-        if (__atomic_compare_exchange_n(&slots[i], &exp, ent, false,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-          return;
-        cur = exp;
-      }
-      if ((cur >> 32) == (u64)key + 1) return;    // already inserted (same value)
-    }
+  void free_() {
+    if (pre) munmap(pre, words * 8);
+    if (ids) munmap(ids, std::max<u64>(nlive, 1) * 4);
+    if (bits) munmap(bits, words * 8);
+    pre = nullptr; ids = nullptr; bits = nullptr;
   }
-  inline u32 get(u32 key) const {                  // 0 if absent (= 0-leaf)
-    u64 hsh = (u64)key * 0x9E3779B97F4A7C15ull;
-    for (u64 i = (hsh ^ (hsh >> 31)) & (nslots - 1);; i = (i + 1) & (nslots - 1)) {
-      u64 cur = slots[i];
-      if (cur == 0) return 0;
-      if ((cur >> 32) == (u64)key + 1) return (u32)cur;
-    }
+  inline u32 get(u64 key) const {
+    u64 w = key >> 6, bw = bits[w], m = 1ull << (key & 63);
+    if (!(bw & m)) return 0;
+    return ids[pre[w] + __builtin_popcountll(bw & (m - 1))];
   }
 };
 
@@ -382,7 +399,7 @@ struct Forest {
     std::vector<u64*> live(W + 1);
     for (int c = 0; c <= W; ++c) live[c] = (u64*)bigalloc(KS / 8);
     for (int k = 0; k <= CELLS; ++k) {
-      u32 key = keyOf(0, 0, 0, k, (k + 1) / 2);
+      u64 key = keyOf(0, 0, 0, k, (k + 1) / 2);
       live[0][key >> 6] |= 1ull << (key & 63);
     }
     for (int c = 0; c < W; ++c) {
@@ -402,7 +419,7 @@ struct Forest {
               while (wv) {
                 int b = __builtin_ctzll(wv);
                 wv &= wv - 1;
-                u32 key = (u32)(wi * 64 + b);
+                u64 key = wi * 64 + b;
                 int rx = key & ((1 << XBITS) - 1);
                 int r = (key >> XBITS) & ((1 << SBITS) - 1);
                 int Cc = (key >> (XBITS + SBITS)) & ((1 << SB) - 1);
@@ -413,7 +430,7 @@ struct Forest {
                   int r2 = r - hgt_[D], rx2 = rx - xcnt_[D];
                   if (r2 < 0 || rx2 < 0 || rx2 > r2 || r2 > cap) continue;
                   if (win4(A, B, Cc, D)) continue;
-                  u32 nk = keyOf(B, Cc, D, r2, rx2);
+                  u64 nk = keyOf(B, Cc, D, r2, rx2);
                   __atomic_fetch_or(&live[c + 1][nk >> 6], 1ull << (nk & 63), __ATOMIC_RELAXED);
                 }
               }
@@ -430,88 +447,63 @@ struct Forest {
     P.alloc(maxNodes, slotsLog);
 
     // ---- backward construction ----
-    KeyMap maps[8];
+    const u64 words = KS / 64;
+    LiveRank maps[8];
     for (int c = W - 1; c >= 0; --c) {
       double t0 = now_s();
-      // gather live keys of level c
-      std::vector<u32> keys;
-      {
-        u64 words = KS / 64;
-        std::vector<u64> cnts(threads, 0);
-        std::vector<std::thread> th;
-        u64 per = (words + threads - 1) / threads;
-        for (int t = 0; t < threads; ++t)
-          th.emplace_back([&, t] {
-            u64 b = t * per, e = std::min(words, b + per), c2 = 0;
-            for (u64 wi = b; wi < e; ++wi) c2 += __builtin_popcountll(live[c][wi]);
-            cnts[t] = c2;
-          });
-        for (auto& x : th) x.join();
-        u64 total = 0;
-        std::vector<u64> off(threads + 1, 0);
-        for (int t = 0; t < threads; ++t) { off[t] = total; total += cnts[t]; }
-        off[threads] = total;
-        keys.resize(total);
-        th.clear();
-        for (int t = 0; t < threads; ++t)
-          th.emplace_back([&, t] {
-            u64 b = t * per, e = std::min(words, b + per), o = off[t];
-            for (u64 wi = b; wi < e; ++wi) {
-              u64 wv = live[c][wi];
-              while (wv) {
-                int b2 = __builtin_ctzll(wv);
-                wv &= wv - 1;
-                keys[o++] = (u32)(wi * 64 + b2);
-              }
-            }
-          });
-        for (auto& x : th) x.join();
-      }
-      maps[c].alloc(std::max<u64>(keys.size(), 16));
+      maps[c].init(live[c], words, threads);
+      live[c] = nullptr;                           // owned by maps[c] now
       std::atomic<u64> ctr{0};
       std::vector<std::thread> th;
+      const u64 WCH = 64;                          // words per work unit
       for (int t = 0; t < threads; ++t)
         th.emplace_back([&] {
           std::vector<u32> tri(2 << SB);
           for (;;) {
-            u64 i0 = ctr.fetch_add(256);
-            if (i0 >= keys.size()) break;
-            u64 i1 = std::min((u64)keys.size(), i0 + 256);
-            for (u64 i = i0; i < i1; ++i) {
-              u32 key = keys[i];
-              int rx = key & ((1 << XBITS) - 1);
-              int r = (key >> XBITS) & ((1 << SBITS) - 1);
-              int Cc = (key >> (XBITS + SBITS)) & ((1 << SB) - 1);
-              int B = (key >> (XBITS + SBITS + SB)) & ((1 << SB) - 1);
-              int A = (key >> (XBITS + SBITS + 2 * SB)) & ((1 << SB) - 1);
-              int cap = H * (W - 1 - c);
-              // children per next-column state D
-              u32* leaf = tri.data() + (1 << SB);
-              for (int D = 0; D < (1 << SB); ++D) leaf[D] = 0;
-              for (int D : validList_) {
-                int r2 = r - hgt_[D], rx2 = rx - xcnt_[D];
-                if (r2 < 0 || rx2 < 0 || rx2 > r2 || r2 > cap) continue;
-                if (win4(A, B, Cc, D)) continue;
-                if (c + 1 == W) leaf[D] = (r2 == 0 && rx2 == 0) ? 1u : 0u;
-                else leaf[D] = maps[c + 1].get(keyOf(B, Cc, D, r2, rx2));
+            u64 w0 = ctr.fetch_add(WCH);
+            if (w0 >= words) break;
+            u64 w1 = std::min(words, w0 + WCH);
+            for (u64 wi = w0; wi < w1; ++wi) {
+              u64 wv = maps[c].bits[wi];
+              u64 slot = maps[c].pre[wi];
+              while (wv) {
+                int bb = __builtin_ctzll(wv);
+                wv &= wv - 1;
+                u64 key = wi * 64 + bb;
+                int rx = key & ((1 << XBITS) - 1);
+                int r = (key >> XBITS) & ((1 << SBITS) - 1);
+                int Cc = (key >> (XBITS + SBITS)) & ((1 << SB) - 1);
+                int B = (key >> (XBITS + SBITS + SB)) & ((1 << SB) - 1);
+                int A = (key >> (XBITS + SBITS + 2 * SB)) & ((1 << SB) - 1);
+                int cap = H * (W - 1 - c);
+                // children per next-column state D
+                u32* leaf = tri.data() + (1 << SB);
+                for (int D = 0; D < (1 << SB); ++D) leaf[D] = 0;
+                for (int D : validList_) {
+                  int r2 = r - hgt_[D], rx2 = rx - xcnt_[D];
+                  if (r2 < 0 || rx2 < 0 || rx2 > r2 || r2 > cap) continue;
+                  if (win4(A, B, Cc, D)) continue;
+                  if (c + 1 == W) leaf[D] = (r2 == 0 && rx2 == 0) ? 1u : 0u;
+                  else leaf[D] = maps[c + 1].get(keyOf(B, Cc, D, r2, rx2));
+                }
+                // binary trie over the SB bits of D, MSB first
+                for (int j = SB - 1; j >= 0; --j) {
+                  u32* up = tri.data() + (1 << j);
+                  u32* dn = tri.data() + (2 << j);
+                  for (int p = 0; p < (1 << j); ++p)
+                    up[p] = P.intern((u8)(c * SB + j), dn[2 * p], dn[2 * p + 1]);
+                }
+                maps[c].ids[slot++] = tri[1];
               }
-              // binary trie over the SB bits of D, MSB first
-              for (int j = SB - 1; j >= 0; --j) {
-                u32* up = tri.data() + (1 << j);
-                u32* dn = tri.data() + (2 << j);
-                for (int p = 0; p < (1 << j); ++p)
-                  up[p] = P.intern((u8)(c * SB + j), dn[2 * p], dn[2 * p + 1]);
-              }
-              if (tri[1]) maps[c].insert(key, tri[1]);
             }
           }
         });
       for (auto& x : th) x.join();
       if (c + 1 < W) maps[c + 1].free_();
-      munmap(live[c + 1], KS / 8);
+      else munmap(live[W], KS / 8);
       if (verbose) {
-        printf("[zdd] level %d built: %s keys, %s nodes total, %.1fs\n",
-               c, commas(keys.size()).c_str(), commas(P.nnodes.load()).c_str(), now_s() - t0);
+        printf("[zdd] level %d built: %s live keys, %s nodes total, %.1fs\n",
+               c, commas(maps[c].nlive).c_str(), commas(P.nnodes.load()).c_str(), now_s() - t0);
         fflush(stdout);
       }
     }
@@ -519,7 +511,6 @@ struct Forest {
     for (int k = 0; k <= CELLS; ++k)
       roots[k] = maps[0].get(keyOf(0, 0, 0, k, (k + 1) / 2));
     maps[0].free_();
-    munmap(live[0], KS / 8);
     nnodes = P.nnodes.load();
 
     // ---- counts ----
@@ -696,118 +687,394 @@ static inline int pushState(int s, int stoneX) {
 }
 
 // ------------------------------------------------------------------------------------------
-// Solver: single backward sweep over plies. Slab files slab_{k}.bin, 2 bits per position
-// (0 draw, 1 win, 2 loss for the side to move).
+// Slab packing (see the header comment): 2-bit or base-3.
+// ------------------------------------------------------------------------------------------
+static int PACK = 2;
+static u8 DEC3[256][5];
+static void initPack() {
+  for (int b = 0; b < 243; ++b)
+    for (int j = 0, q = b; j < 5; ++j, q /= 3) DEC3[b][j] = (u8)(q % 3);
+}
+static inline u64 slabBytes(u64 n) { return PACK == 3 ? (n + 4) / 5 : (n + 31) / 32 * 8; }
+static inline u64 slabByteOf(u64 i) { return PACK == 3 ? i / 5 : i >> 2; }
+static inline u32 slabFromByte(u8 b, u64 i) {
+  return PACK == 3 ? DEC3[b][i % 5] : (u32)(b >> ((i & 3) * 2)) & 3;
+}
+static inline u32 slabGet(const u8* p, u64 i) { return slabFromByte(p[slabByteOf(i)], i); }
+// Pack values vals[0..cnt) of positions lo..lo+cnt-1 into out. lo must be a multiple of 160
+// (= lcm(32, 5)) so that every call owns whole bytes / words; plain stores, no OR, so a
+// chunk re-run after a crash overwrites whatever partial data it left.
+static void packRange(u8* out, u64 lo, const u8* vals, u64 cnt) {
+  if (PACK == 3) {
+    u8* o = out + lo / 5;
+    for (u64 i = 0; i < cnt; i += 5) {
+      u32 b = 0, m = 1;
+      for (u64 j = i, e = std::min(cnt, i + 5); j < e; ++j, m *= 3) b += vals[j] * m;
+      *o++ = (u8)b;
+    }
+  } else {
+    u8* o = out + lo / 4;
+    for (u64 i = 0; i < cnt; i += 32) {
+      u64 w = 0;
+      for (u64 j = i, e = std::min(cnt, i + 32); j < e; ++j) w |= (u64)vals[j] << ((j - i) * 2);
+      memcpy(o, &w, 8);
+      o += 8;
+    }
+  }
+}
+
+static bool fileExists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
+static u64 fileSize(const std::string& p) {
+  struct stat st;
+  return stat(p.c_str(), &st) == 0 ? (u64)st.st_size : UINT64_MAX;
+}
+
+// Copy src to dstDir/name via name.part + fsync + rename, then unlink src. Crash-safe: a
+// final name in dstDir always holds a complete copy, and src is removed only after that.
+static void moveFile(const std::string& src, const std::string& dstDir, const std::string& name) {
+  std::string part = dstDir + "/" + name + ".part", dst = dstDir + "/" + name;
+  int in = open(src.c_str(), O_RDONLY);
+  if (in < 0) die("move: open %s failed", src.c_str());
+  int out = open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (out < 0) die("move: open %s failed", part.c_str());
+  u64 left = fileSize(src);
+  bool useCFR = true;
+  std::vector<char> buf;
+  while (left) {
+    ssize_t got;
+    if (useCFR) {
+      got = copy_file_range(in, nullptr, out, nullptr, std::min<u64>(left, 1ull << 30), 0);
+      if (got < 0 && (errno == EXDEV || errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP)) {
+        useCFR = false; continue;
+      }
+    } else {
+      if (buf.empty()) buf.resize(64 << 20);
+      got = read(in, buf.data(), std::min<u64>(left, buf.size()));
+      for (ssize_t o = 0; got > 0 && o < got;) {
+        ssize_t w = write(out, buf.data() + o, got - o);
+        if (w <= 0) die("move: write %s failed", part.c_str());
+        o += w;
+      }
+    }
+    if (got <= 0) die("move: copy %s failed", src.c_str());
+    left -= (u64)got;
+  }
+  if (fsync(out)) die("move: fsync %s failed", part.c_str());
+  close(out); close(in);
+  if (fileSize(part) != fileSize(src)) die("move: size mismatch for %s", part.c_str());
+  if (rename(part.c_str(), dst.c_str())) die("move: rename %s failed", part.c_str());
+  int dfd = open(dstDir.c_str(), O_RDONLY | O_DIRECTORY);
+  if (dfd >= 0) { fsync(dfd); close(dfd); }
+  if (unlink(src.c_str())) die("move: unlink %s failed", src.c_str());
+}
+
+// Where the slabs live: the board directory, plus an optional archive directory that
+// finished slabs are moved to during a solve (e.g. a bulk disk, keeping only the working
+// pair on fast storage). Lookups try the board directory first.
+struct SlabStore {
+  std::string dir, archive;
+  std::string local(int k) const { return dir + "/slab_" + std::to_string(k) + ".bin"; }
+  std::string arch(int k) const { return archive + "/slab_" + std::to_string(k) + ".bin"; }
+  std::string find(int k) const {
+    if (fileExists(local(k))) return local(k);
+    if (!archive.empty() && fileExists(arch(k))) return arch(k);
+    return "";
+  }
+  const u8* mapRO(int k, u64 n) const {
+    std::string p = find(k);
+    if (p.empty()) die("missing slab %d — solve first", k);
+    u64 bytes = slabBytes(n);
+    if (fileSize(p) != bytes)
+      die("%s: size %" PRIu64 " != expected %" PRIu64 " (wrong packing?)", p.c_str(), fileSize(p), bytes);
+    int fd = open(p.c_str(), O_RDONLY);
+    if (fd < 0) die("open %s failed", p.c_str());
+    void* m = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (m == MAP_FAILED) die("mmap %s failed", p.c_str());
+    close(fd);
+    return (const u8*)m;
+  }
+  u32 valueAt(int k, u64 i) const {
+    std::string p = find(k);
+    if (p.empty()) die("missing slab %d — solve first", k);
+    int fd = open(p.c_str(), O_RDONLY);
+    if (fd < 0) die("open %s failed", p.c_str());
+    u8 b = 0;
+    if (pread(fd, &b, 1, (off_t)slabByteOf(i)) != 1) die("pread failed");
+    close(fd);
+    return slabFromByte(b, i);
+  }
+};
+
+// Packing for a board directory. The marker file PACK_BASE3 selects base-3; without it the
+// slabs are 2-bit (so the published 7x6 and smaller tables need no marker). For a solve,
+// `requested` (2, 3, or 0 = default by board size) must agree with any existing slabs.
+static int resolvePack(const SlabStore& st, int requested, bool forSolve) {
+  std::string marker = st.dir + "/PACK_BASE3";
+  if (fileExists(marker)) {
+    if (requested == 2) die("%s holds base-3 slabs (PACK_BASE3) but --pack 2 was given", st.dir.c_str());
+    return 3;
+  }
+  if (!forSolve) {
+    if (requested == 3) die("%s has no PACK_BASE3 marker but --pack 3 was given", st.dir.c_str());
+    return 2;
+  }
+  bool any = false;
+  for (int k = 0; k <= CELLS && !any; ++k)
+    any = !st.find(k).empty() || fileExists(st.local(k) + ".tmp");
+  if (any) {
+    if (requested == 3) die("%s already holds 2-bit slabs but --pack 3 was given", st.dir.c_str());
+    return 2;
+  }
+  int p = requested ? requested : (CELLS > 42 ? 3 : 2);
+  if (p == 3) {
+    FILE* f = fopen(marker.c_str(), "w");
+    if (!f) die("cannot write %s", marker.c_str());
+    fprintf(f, "slab_{ply}.bin: 5 values per byte, byte i/5 = sum v_j*3^j (j = i%%5); "
+               "0 draw, 1 win, 2 loss for the side to move\n");
+    fclose(f);
+  }
+  return p;
+}
+
+// ------------------------------------------------------------------------------------------
+// Solver: single backward sweep over plies. Slab files slab_{k}.bin (0 draw, 1 win, 2 loss
+// for the side to move). Each ply is written to slab_{k}.bin.tmp and renamed when complete;
+// within a ply, progress is checkpointed every --ckpt-min minutes to slab_{k}.bin.ckpt
+// (done-chunk flags + tallies, taken after msync), so an interrupted ply resumes rather
+// than restarts (the largest 7x7 ply is ~a day of compute).
 // ------------------------------------------------------------------------------------------
 struct C4Solver {
   Forest Z;
-  std::string dir;
-  int threads;
+  SlabStore st;
+  int threads = 1;
+  double ckptSec = 900;
+  static constexpr u64 CHUNK = 5 << 16;          // 327680: a multiple of 160
+  static constexpr u64 CKMAGIC = 0xC4C4C4C4000C4C7Bull;
 
-  std::string slabPath(int k) const { return dir + "/slab_" + std::to_string(k) + ".bin"; }
+  std::string tmpPath(int k) const { return st.local(k) + ".tmp"; }
+  std::string ckptPath(int k) const { return st.local(k) + ".ckpt"; }
 
-  u64* mapSlab(int k, bool write, u64 n) const {
-    u64 bytes = (n + 31) / 32 * 8;
-    std::string p = slabPath(k) + (write ? ".tmp" : "");
-    int fd = open(p.c_str(), write ? (O_RDWR | O_CREAT | O_TRUNC) : O_RDONLY, 0644);
+  u8* mapOut(int k, u64 n, bool keep) const {
+    u64 bytes = slabBytes(n);
+    std::string p = tmpPath(k);
+    int fd = open(p.c_str(), O_RDWR | O_CREAT | (keep ? 0 : O_TRUNC), 0644);
     if (fd < 0) die("open %s failed", p.c_str());
-    if (write && ftruncate(fd, (off_t)bytes)) die("ftruncate failed");
-    void* m = mmap(nullptr, bytes, write ? (PROT_READ | PROT_WRITE) : PROT_READ,
-                   write ? MAP_SHARED : MAP_PRIVATE, fd, 0);
+    if (!keep && ftruncate(fd, (off_t)bytes)) die("ftruncate failed");
+    void* m = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (m == MAP_FAILED) die("mmap slab failed");
     close(fd);
-    return (u64*)m;
+    return (u8*)m;
   }
 
-  void solvePly(int k, u64* out, const u64* next, u64* tallies) {
-    u64 n = Z.perPly[k];
+  // Load a checkpoint for ply k: fills done[] and prev tallies. False if none / unusable.
+  bool loadCkpt(int k, u64 n, std::vector<u8>& done, u64* prev) const {
+    u64 nchunks = (n + CHUNK - 1) / CHUNK;
+    if (fileSize(tmpPath(k)) != slabBytes(n)) return false;
+    FILE* f = fopen(ckptPath(k).c_str(), "rb");
+    if (!f) return false;
+    u64 h[9];
+    bool ok = fread(h, 8, 9, f) == 9 && h[0] == CKMAGIC && h[1] == (u64)k && h[2] == n &&
+              h[3] == CHUNK && h[4] == (u64)PACK && h[5] == nchunks;
+    if (ok) {
+      done.assign(nchunks, 0);
+      ok = fread(done.data(), 1, nchunks, f) == nchunks;
+      prev[0] = h[6]; prev[1] = h[7]; prev[2] = h[8];
+    }
+    fclose(f);
+    return ok;
+  }
+  void writeCkpt(int k, u64 n, const std::vector<u8>& done, const u64* tl) const {
+    std::string p = ckptPath(k), tmp = p + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) die("cannot write %s", tmp.c_str());
+    u64 h[9] = {CKMAGIC, (u64)k, n, CHUNK, (u64)PACK, (u64)done.size(), tl[0], tl[1], tl[2]};
+    fwrite(h, 8, 9, f);
+    fwrite(done.data(), 1, done.size(), f);
+    fflush(f);
+    if (fsync(fileno(f))) die("fsync %s failed", tmp.c_str());
+    fclose(f);
+    if (rename(tmp.c_str(), p.c_str())) die("rename %s failed", tmp.c_str());
+  }
+
+  // done[]: 1 for chunks already complete on disk (from a checkpoint); prev: their tallies.
+  void solvePly(int k, u8* out, const u8* next, std::vector<u8>& done, const u64* prev,
+                u64* tallies) {
+    u64 n = Z.perPly[k], nchunks = done.size();
+    std::vector<u8> fromCkpt = done;
+    std::vector<std::array<u32, 3>> ctl(nchunks, {0, 0, 0});
     std::atomic<u64> chunkCtr{0};
-    const u64 CHUNK = 1 << 18;
     int stmX = (k % 2 == 0);
+
+    // checkpointer
+    std::mutex mu;
+    std::condition_variable cv;
+    bool finished = false;
+    auto snapshot = [&](std::vector<u8>& snap, u64* tl) {
+      snap.assign(nchunks, 0);
+      tl[0] = prev[0]; tl[1] = prev[1]; tl[2] = prev[2];
+      for (u64 ci = 0; ci < nchunks; ++ci) {
+        snap[ci] = __atomic_load_n(&done[ci], __ATOMIC_ACQUIRE);
+        if (snap[ci] && !fromCkpt[ci])
+          for (int v = 0; v < 3; ++v) tl[v] += ctl[ci][v];
+      }
+    };
+    std::thread ckpt([&] {
+      std::unique_lock<std::mutex> lk(mu);
+      for (;;) {
+        if (cv.wait_for(lk, std::chrono::duration<double>(ckptSec), [&] { return finished; }))
+          return;
+        double tc = now_s();
+        std::vector<u8> snap;
+        u64 tl[3];
+        snapshot(snap, tl);
+        // everything in snap is now on disk; a failed flush must never be checkpointed
+        if (msync(out, slabBytes(n), MS_SYNC)) die("msync failed during checkpoint (disk full?)");
+        writeCkpt(k, n, snap, tl);
+        u64 nd = 0;
+        for (u8 b : snap) nd += b;
+        printf("[ckpt ply %d] %s / %s chunks done (%.1f%%), checkpoint took %.1fs\n", k,
+               commas(nd).c_str(), commas(nchunks).c_str(), 100.0 * nd / nchunks, now_s() - tc);
+        fflush(stdout);
+      }
+    });
+
     std::vector<std::thread> th;
-    std::vector<std::array<u64, 3>> tl(threads, {0, 0, 0});
     for (int t = 0; t < threads; ++t)
-      th.emplace_back([&, t] {
+      th.emplace_back([&] {
         FIter it;
         u32 nodeAt[9]; u64 kAt[9];
         u8 child[8];
+        std::vector<u8> vals(CHUNK);
         for (;;) {
-          u64 lo = chunkCtr.fetch_add(1) * CHUNK;
-          if (lo >= n) break;
-          u64 hi = std::min(n, lo + CHUNK);
+          u64 ci = chunkCtr.fetch_add(1);
+          if (ci >= nchunks) break;
+          if (fromCkpt[ci]) continue;
+          u64 lo = ci * CHUNK, hi = std::min(n, lo + CHUNK);
+          u32 cnt[3] = {0, 0, 0};
           it.initAt(Z, k, lo);
-          u64 idx = lo;
-          while (idx < hi) {
-            u64 wi = idx >> 5;
-            u64 spanEnd = std::min(hi, (wi + 1) << 5);
-            u64 wv = 0;
-            for (; idx < spanEnd; ++idx) {
-              u64 xbb, obb;
-              toBitboards(it.arr, xbb, obb);
-              u64 own = stmX ? xbb : obb;
-              int best = 2;                        // loss unless improved
-              bool prefixBuilt = false;
-              for (int c = 0; c < W; ++c) {
-                int s = it.arr[c], hh = hgt_[s];
-                if (hh >= H) continue;
-                u64 nb = own | (1ull << (c * (H + 1) + hh));
-                if (hasWin(nb)) { best = 1; break; }
-                int v;
-                if (k + 1 == CELLS) v = 0;         // full board, no win: draw
-                else {
-                  if (!prefixBuilt) { Z.buildPrefix(k + 1, it.arr, nodeAt, kAt); prefixBuilt = true; }
-                  u8 saved = it.arr[c];
-                  memcpy(child, it.arr, W);
-                  child[c] = (u8)pushState(s, stmX);
-                  u64 ck = Z.rankFrom(nodeAt[c], kAt[c], child);
-                  (void)saved;
-                  if (ck == UINT64_MAX) die("child rank failed (ply %d)", k);
-                  u32 cv = (u32)((next[ck >> 5] >> ((ck & 31) * 2)) & 3);
-                  v = cv == 2 ? 1 : cv == 1 ? 2 : 0;   // child loss => my win
-                }
-                if (v == 1) { best = 1; break; }
-                if (v == 0 && best == 2) best = 0;
+          for (u64 idx = lo; idx < hi; ++idx) {
+            u64 xbb, obb;
+            toBitboards(it.arr, xbb, obb);
+            u64 own = stmX ? xbb : obb;
+            int best = 2;                          // loss unless improved
+            bool prefixBuilt = false;
+            for (int c = 0; c < W; ++c) {
+              int s = it.arr[c], hh = hgt_[s];
+              if (hh >= H) continue;
+              u64 nb = own | (1ull << (c * (H + 1) + hh));
+              if (hasWin(nb)) { best = 1; break; }
+              int v;
+              if (k + 1 == CELLS) v = 0;           // full board, no win: draw
+              else {
+                if (!prefixBuilt) { Z.buildPrefix(k + 1, it.arr, nodeAt, kAt); prefixBuilt = true; }
+                memcpy(child, it.arr, W);
+                child[c] = (u8)pushState(s, stmX);
+                u64 ck = Z.rankFrom(nodeAt[c], kAt[c], child);
+                if (ck == UINT64_MAX) die("child rank failed (ply %d)", k);
+                u32 cv2 = slabGet(next, ck);
+                v = cv2 == 2 ? 1 : cv2 == 1 ? 2 : 0;   // child loss => my win
               }
-              wv |= (u64)best << ((idx & 31) * 2);
-              ++tl[t][best];
-              if (idx + 1 < hi) { bool ok = it.next(); (void)ok; assert(ok); }
+              if (v == 1) { best = 1; break; }
+              if (v == 0 && best == 2) best = 0;
             }
-            out[wi] |= wv;
+            vals[idx - lo] = (u8)best;
+            ++cnt[best];
+            if (idx + 1 < hi) { bool ok = it.next(); (void)ok; assert(ok); }
           }
+          packRange(out, lo, vals.data(), hi - lo);
+          ctl[ci] = {cnt[0], cnt[1], cnt[2]};
+          __atomic_store_n(&done[ci], (u8)1, __ATOMIC_RELEASE);
         }
       });
     for (auto& x : th) x.join();
-    for (int t = 0; t < threads; ++t)
-      for (int v = 0; v < 3; ++v) tallies[v] += tl[t][v];
+    { std::lock_guard<std::mutex> lk(mu); finished = true; }
+    cv.notify_all();
+    ckpt.join();
+    std::vector<u8> snap;
+    snapshot(snap, tallies);
   }
 
   void solve() {
-    mkdir(dir.c_str(), 0755);
-    u64* next = nullptr;
-    u64 nextBytes = 0;
+    mkdir(st.dir.c_str(), 0755);
+    if (!st.archive.empty()) {
+      mkdir(st.archive.c_str(), 0755);
+      // tidy an interrupted move: a final archive name is always complete
+      for (int k = 0; k <= CELLS; ++k) {
+        unlink((st.arch(k) + ".part").c_str());
+        if (fileExists(st.arch(k)) && fileExists(st.local(k))) {
+          printf("[solve] slab %d already archived; removing local copy\n", k);
+          if (unlink(st.local(k).c_str())) die("unlink failed");
+        }
+      }
+    }
     // resume: find highest k with no finished slab
     int startK = CELLS - 1;
-    while (startK >= 0) {
-      struct stat st;
-      if (stat(slabPath(startK).c_str(), &st) != 0) break;
-      --startK;
-    }
+    while (startK >= 0 && !st.find(startK).empty()) --startK;
+    for (int k = startK + 1; k < CELLS; ++k) { unlink(ckptPath(k).c_str()); unlink(tmpPath(k).c_str()); }
+    if (!st.archive.empty())                       // finished slabs no longer needed locally
+      for (int k = startK + 2; k < CELLS; ++k)
+        if (fileExists(st.local(k))) {
+          printf("[solve] archiving leftover slab %d\n", k);
+          fflush(stdout);
+          moveFile(st.local(k), st.archive, "slab_" + std::to_string(k) + ".bin");
+        }
+    const u8* next = nullptr;
+    u64 nextBytes = 0;
     if (startK < CELLS - 1) {
       int kn = startK + 1;
-      next = mapSlab(kn, false, Z.perPly[kn]);
-      nextBytes = (Z.perPly[kn] + 31) / 32 * 8;
+      next = st.mapRO(kn, Z.perPly[kn]);
+      nextBytes = slabBytes(Z.perPly[kn]);
       printf("[solve] resuming at ply %d\n", startK);
     }
+    printf("[solve] packing: %s; checkpoint every %.0f min%s%s\n",
+           PACK == 3 ? "base-3 (5 per byte)" : "2-bit", ckptSec / 60,
+           st.archive.empty() ? "" : "; finished slabs move to ", st.archive.c_str());
+    fflush(stdout);
+    std::thread mover;
     for (int k = startK; k >= 0; --k) {
       double t0 = now_s();
       u64 n = Z.perPly[k];
-      u64* out = mapSlab(k, true, n);
+      u64 nchunks = (n + CHUNK - 1) / CHUNK;
+      std::vector<u8> done;
+      u64 prev[3] = {0, 0, 0};
+      bool keep = loadCkpt(k, n, done, prev);
+      if (keep) {
+        u64 nd = 0;
+        for (u8 b : done) nd += b;
+        printf("[ply %2d] resuming from checkpoint: %s / %s chunks done\n", k,
+               commas(nd).c_str(), commas(nchunks).c_str());
+      } else {
+        done.assign(nchunks, 0);
+        unlink(ckptPath(k).c_str());
+      }
+      {
+        // refuse to start a ply that cannot fit: writing into a full disk through the
+        // mmap kills the process with SIGBUS (the last checkpoint stays valid, but fail early)
+        struct statvfs vfs;
+        struct stat tst;
+        u64 have = statvfs(st.dir.c_str(), &vfs) == 0 ? (u64)vfs.f_bavail * vfs.f_frsize : UINT64_MAX;
+        u64 already = keep && stat(tmpPath(k).c_str(), &tst) == 0 ? (u64)tst.st_blocks * 512 : 0;
+        u64 need = slabBytes(n) > already ? slabBytes(n) - already : 0;
+        need += need / 50 + (1ull << 30);          // 2% + 1 GiB margin
+        if (need > have)
+          die("ply %d needs %.1f GB more in %s but only %.1f GB is free — free space or pass "
+              "--archive DIR to move finished slabs elsewhere", k, need / 1e9, st.dir.c_str(), have / 1e9);
+      }
+      u8* out = mapOut(k, n, keep);
       u64 tallies[3] = {0, 0, 0};
-      solvePly(k, out, next, tallies);
-      u64 bytes = (n + 31) / 32 * 8;
-      msync(out, bytes, MS_SYNC);
-      if (rename((slabPath(k) + ".tmp").c_str(), slabPath(k).c_str())) die("rename failed");
-      if (next) munmap(next, nextBytes);
+      solvePly(k, out, next, done, prev, tallies);
+      u64 bytes = slabBytes(n);
+      if (msync(out, bytes, MS_SYNC)) die("msync of ply %d failed (disk full?)", k);
+      if (rename(tmpPath(k).c_str(), st.local(k).c_str())) die("rename failed");
+      unlink(ckptPath(k).c_str());
+      if (next) munmap((void*)next, nextBytes);
+      if (!st.archive.empty() && k + 1 < CELLS) {
+        if (mover.joinable()) mover.join();
+        int ka = k + 1;
+        mover = std::thread([this, ka] {
+          moveFile(st.local(ka), st.archive, "slab_" + std::to_string(ka) + ".bin");
+        });
+      }
       next = out;
       nextBytes = bytes;
       printf("[ply %2d] n=%-15s  W/D/L(stm) = %s / %s / %s   %.1fs\n",
@@ -815,7 +1082,20 @@ struct C4Solver {
              commas(tallies[2]).c_str(), now_s() - t0);
       fflush(stdout);
     }
-    if (next) munmap(next, nextBytes);
+    if (next) munmap((void*)next, nextBytes);
+    if (mover.joinable()) mover.join();
+    if (!st.archive.empty()) {
+      // make the archive a complete board directory: slab 0, zdd.bin and the marker
+      if (fileExists(st.local(0))) moveFile(st.local(0), st.archive, "slab_0.bin");
+      for (const char* f : {"zdd.bin", "PACK_BASE3"}) {
+        std::string src = st.dir + "/" + f;
+        if (!fileExists(src) || fileExists(st.archive + "/" + f)) continue;
+        std::string cp = src + ".copy";
+        if (link(src.c_str(), cp.c_str()) && errno != EEXIST) die("link %s failed", cp.c_str());
+        moveFile(cp, st.archive, f);
+      }
+      printf("[solve] archive %s is a complete board directory (use --dir)\n", st.archive.c_str());
+    }
     printf("[solve] complete.\n");
   }
 };
@@ -861,8 +1141,11 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     fprintf(stderr,
       "usage: %s count [--board WxH] [--brute] | buildzdd | solve | selftest |\n"
-      "       %s probe <moveseq|-> | analyze | bfcheck [n]\n"
-      "       common flags: --board WxH (default 7x6), --threads N, --dir D\n",
+      "       %s probe <moveseq|-> | analyze | bfcheck [n] | reachtally | bigtally\n"
+      "       common flags: --board WxH (default 7x6; 4<=W<=7, 4<=H<=7), --threads N,\n"
+      "         --dir D, --archive D (2nd slab directory; solve moves finished slabs there)\n"
+      "       solve flags: --pack 2|3 (default 2-bit up to 42 cells, base-3 above),\n"
+      "         --ckpt-min M (in-ply checkpoint interval, default 15)\n",
       argv[0], argv[0]);
     return 1;
   }
@@ -870,21 +1153,32 @@ int main(int argc, char** argv) {
   int threads = (int)std::thread::hardware_concurrency();
   int w = 7, h = 6;
   bool brute = false;
-  std::string dir = "";
+  std::string dir = "", archive = "";
+  int packReq = 0;
+  double ckptMin = 15;
   std::vector<std::string> rest;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--board" && i + 1 < argc) sscanf(argv[++i], "%dx%d", &w, &h);
     else if (a == "--threads" && i + 1 < argc) threads = atoi(argv[++i]);
     else if (a == "--dir" && i + 1 < argc) dir = argv[++i];
+    else if (a == "--archive" && i + 1 < argc) archive = argv[++i];
+    else if (a == "--pack" && i + 1 < argc) packReq = atoi(argv[++i]);
+    else if (a == "--ckpt-min" && i + 1 < argc) ckptMin = atof(argv[++i]);
     else if (a == "--brute") brute = true;
     else rest.push_back(a);
   }
-  if (w < 4 || w > 7 || h < 4 || h > 6) die("supported: 4<=W<=7, 4<=H<=6");
+  if (w < 4 || w > 7 || h < 4 || h > 7) die("supported: 4<=W<=7, 4<=H<=7");
+  if (packReq != 0 && packReq != 2 && packReq != 3) die("--pack must be 2 or 3");
   initTables(w, h);
+  initPack();
   // Relative to the working directory, so the solver tree can be moved without editing source.
   if (dir.empty()) dir = "c4_wdl_" + std::to_string(w) + "x" + std::to_string(h);
   std::string zddPath = dir + "/zdd.bin";
+  SlabStore store;
+  store.dir = dir;
+  store.archive = archive;
+  if (cmd != "solve" && cmd != "count" && cmd != "buildzdd") PACK = resolvePack(store, packReq, false);
   double t0 = now_s();
   initWin4(threads);
 
@@ -937,8 +1231,10 @@ int main(int argc, char** argv) {
   } else if (cmd == "solve") {
     C4Solver S;
     S.threads = threads;
-    S.dir = dir;
+    S.st = store;
+    S.ckptSec = ckptMin * 60;
     ensureForest(S.Z, true);
+    PACK = resolvePack(store, packReq, true);
     t0 = now_s();
     S.solve();
     printf("[solve] total %.1fs\n", now_s() - t0);
@@ -1006,24 +1302,24 @@ int main(int argc, char** argv) {
     Forest Z;
     ensureForest(Z, false);
     int nsamp = rest.empty() ? 500 : atoi(rest[0].c_str());
-    int minPly = (W * H > 30) ? 26 : 0;   // keep negamax tractable on the full board
+    int minPly = (W * H > 30) ? CELLS - 16 : 0;   // keep negamax tractable (<= 16 empty cells)
+    std::vector<int> avail;                  // plies with a finished slab (partial solves too)
+    for (int k = minPly; k < CELLS; ++k)
+      if (Z.perPly[k] && !store.find(k).empty()) avail.push_back(k);
+    if (avail.empty()) die("no finished slabs in plies %d..%d — solve first", minPly, CELLS - 1);
+    if ((int)avail.size() < CELLS - minPly)
+      printf("[bfcheck] sampling the %zu finished plies %d..%d\n", avail.size(), avail.front(),
+             avail.back());
     std::mt19937_64 rng(2025);
     u8 arr[8];
     int done = 0;
     while (done < nsamp) {
-      int k = minPly + (int)(rng() % (CELLS - minPly));
-      if (!Z.perPly[k]) continue;
+      int k = avail[rng() % avail.size()];
       u64 r = rng() % Z.perPly[k];
       Z.unrank(k, r, arr);
       int bv = bf::eval(arr, k);
       u64 ck = Z.rank(k, arr);
-      std::string sp = dir + "/slab_" + std::to_string(k) + ".bin";
-      int fd = open(sp.c_str(), O_RDONLY);
-      if (fd < 0) die("missing slab %d — solve first", k);
-      u64 wv = 0;
-      if (pread(fd, &wv, 8, (off_t)((ck >> 5) * 8)) != 8) die("pread failed");
-      close(fd);
-      u32 tv = (u32)((wv >> ((ck & 31) * 2)) & 3);
+      u32 tv = store.valueAt(k, ck);
       int tvi = tv == 1 ? 1 : tv == 2 ? -1 : 0;
       if (tvi != bv) die("bfcheck MISMATCH ply %d rank %" PRIu64 ": table=%d bf=%d", k, r, tvi, bv);
       ++done;
@@ -1068,17 +1364,7 @@ int main(int argc, char** argv) {
       u64 n = Z.perPly[k];
       u64* nvis = nullptr;
       if (k < CELLS) nvis = (u64*)bigalloc((Z.perPly[k + 1] + 63) / 64 * 8);
-      u64* slab = nullptr;
-      u64 slabBytes = 0;
-      if (k < CELLS) {
-        std::string sp = dir + "/slab_" + std::to_string(k) + ".bin";
-        int fd = open(sp.c_str(), O_RDONLY);
-        if (fd < 0) die("missing slab %d", k);
-        slabBytes = (n + 31) / 32 * 8;
-        slab = (u64*)mmap(nullptr, slabBytes, PROT_READ, MAP_PRIVATE, fd, 0);
-        if (slab == MAP_FAILED) die("mmap slab failed");
-        close(fd);
-      }
+      const u8* slab = k < CELLS ? store.mapRO(k, n) : nullptr;
       std::atomic<u64> chunkCtr{0};
       const u64 CHUNK = 1 << 18;
       int stmX = (k % 2 == 0);
@@ -1098,7 +1384,7 @@ int main(int argc, char** argv) {
               if ((vis[r >> 6] >> (r & 63)) & 1) {
                 ++tl[t][3];
                 if (k < CELLS) {
-                  u32 v = (u32)((slab[r >> 5] >> ((r & 31) * 2)) & 3);
+                  u32 v = slabGet(slab, r);
                   u32 fp = stmX ? v : (v == 1 ? 2u : v == 2 ? 1u : 0u);
                   ++tl[t][fp == 1 ? 0 : fp == 2 ? 2 : 1];
                   u64 xbb, obb;
@@ -1140,7 +1426,7 @@ int main(int argc, char** argv) {
              ok ? "MATCH" : "MISMATCH!", now_s() - t0);
       fflush(stdout);
       munmap(vis, (n + 63) / 64 * 8);
-      if (slab) munmap(slab, slabBytes);
+      if (slab) munmap((void*)slab, slabBytes(n));
       vis = nvis;
     }
     printf("[bigtally] %s\n", allOK ? "ALL 43 PLIES MATCH the reference solution table"
@@ -1202,21 +1488,16 @@ int main(int argc, char** argv) {
       if (k == CELLS) {
         drawn[k] += reach;                       // full board, no win
       } else {
-        std::string sp = dir + "/slab_" + std::to_string(k) + ".bin";
-        int fd = open(sp.c_str(), O_RDONLY);
-        if (fd < 0) die("missing slab %d — solve first", k);
-        u64 bytes = (Z.perPly[k] + 31) / 32 * 8;
-        u64* slab = (u64*)mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-        if (slab == MAP_FAILED) die("mmap slab failed");
-        close(fd);
+        const u8* slab = store.mapRO(k, Z.perPly[k]);
+        u64 bytes = slabBytes(Z.perPly[k]);
         for (u64 r = 0; r < Z.perPly[k]; ++r) {
           if (!((visited[k][r >> 6] >> (r & 63)) & 1)) continue;
-          u32 v = (u32)((slab[r >> 5] >> ((r & 31) * 2)) & 3);
+          u32 v = slabGet(slab, r);
           // convert side-to-move value to first-player perspective
           u32 fp = (k % 2 == 0) ? v : (v == 1 ? 2u : v == 2 ? 1u : 0u);
           if (fp == 1) ++won[k]; else if (fp == 2) ++lost[k]; else ++drawn[k];
         }
-        munmap(slab, bytes);
+        munmap((void*)slab, bytes);
       }
       // terminals: winner is the mover of ply k (odd ply => X moved => won for X)
       if (term[k]) {
@@ -1274,15 +1555,7 @@ int main(int argc, char** argv) {
     if (hasWin(xbb)) { printf("TERMINAL: X has already won.\n"); return 0; }
     if (hasWin(obb)) { printf("TERMINAL: O has already won.\n"); return 0; }
     if (k == CELLS) { printf("TERMINAL: board full — DRAW.\n"); return 0; }
-    auto slabVal = [&](int ply, u64 rk) -> u32 {
-      std::string sp = dir + "/slab_" + std::to_string(ply) + ".bin";
-      int fd = open(sp.c_str(), O_RDONLY);
-      if (fd < 0) die("missing slab %d — solve first", ply);
-      u64 wv = 0;
-      if (pread(fd, &wv, 8, (off_t)((rk >> 5) * 8)) != 8) die("pread failed");
-      close(fd);
-      return (u32)((wv >> ((rk & 31) * 2)) & 3);
-    };
+    auto slabVal = [&](int ply, u64 rk) -> u32 { return store.valueAt(ply, rk); };
     u64 rk = Z.rank(k, arr);
     if (rk == UINT64_MAX) die("position not in space?!");
     u32 v = slabVal(k, rk);

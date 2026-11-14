@@ -1,4 +1,4 @@
-# Connect Four (7×6) strong solver — ZDD minimal perfect hash + retrograde WDL table
+# Connect Four (7×6, 7×7) strong solver — ZDD minimal perfect hash + retrograde WDL table
 
 Strongly solves 7×6 Connect Four (and smaller boards) with the ZDD-MPH + retrograde
 architecture of the [NOCCA×NOCCA](../nocca/README.md) and
@@ -34,6 +34,59 @@ solves the same game in 47 h / 128 GB; this pipeline solves and *tabulates* it i
   independent negamax; the repo README's example position (moves `332`) reproduces its
   documented evaluation exactly (WIN; winning moves = columns 1 and 4).
 
+## 7×7 (in progress)
+
+The same pipeline handles boards up to 7 rows. The ZDD key grows to 35 bits, and column states
+to 8 bits (191 states without a vertical four). 7×7 is 34× the size of 7×6:
+
+| | 7×6 | 7×7 |
+|---|---:|---:|
+| pseudo-legal non-terminal positions | 2,637,477,442,337 | **90,623,793,528,223** |
+| largest ply | ply 32: 2.90×10¹¹ | ply 38: 9.10×10¹² |
+| ZDD forest | 55.7 M nodes, 27 s | **355,944,868 nodes** (6.05 GB), 190 s; root counts = DP on all 50 plies |
+| table | 615 GiB (2-bit) | **18.1 TB** base-3 (22.7 TB if 2-bit) |
+| working pair on disk | 141 GB | 3.6 TB base-3 (plies 37+38) |
+
+Solved so far (2026-11-13/14; W/D/L for the side to move, 64 threads):
+
+| ply | positions | W / D / L | time | rate |
+|---:|---:|---|---:|---:|
+| 48 | 76,185,111,344 | 24,467,558,434 / 51,717,552,910 / 0 | 82 s | (no child lookups) |
+| 47 | 214,011,067,810 | 89,092,350,436 / 107,133,060,838 / 17,785,656,536 | 1,316 s | 163 M/s |
+| 46 | 498,748,865,078 | 297,193,526,168 / 159,048,224,904 / 42,507,114,006 | 3,258 s | 153 M/s |
+| 45 | 953,521,410,133 | 585,788,770,138 / 213,370,858,803 / 154,361,781,192 | 6,837 s | 139 M/s |
+| 44 | 1,770,971,384,888 | 1,282,305,112,091 / 233,320,601,432 / 255,345,671,365 | 12,656 s | 140 M/s |
+| 43 | 2,823,679,161,433 | 2,006,840,674,411 / 258,329,664,777 / 558,508,822,245 | 21,847 s | 129 M/s |
+| 42 | 4,391,258,836,348 | 3,368,106,125,521 / 246,350,114,067 / 776,802,596,760 | 34,740 s | 126 M/s |
+
+Ply 41 was stopped at 30% to attach the archive disk, and resumes from its checkpoint. The
+remaining ~8.0×10¹³ positions project to about 8–9 more days at 100–120 M/s. The next ply's slab no longer fits in RAM (723 GB), but for a fixed move
+column, child ranks increase with parent rank, so the child slab is read as 7 forward streams.
+The page cache handles that; no random I/O.
+
+Storage plan: the run needs the working pair on fast storage plus somewhere to put 18 TB
+of finished slabs. `--archive` moves each slab to a bulk disk as soon as it is no longer needed:
+
+```
+./c4 solve --board 7x7 --archive /bulk/c4_wdl_7x7      # resumable; re-run the same command
+```
+
+Without `--archive`, the 4.1 TB free here lasts through about ply 42 (plies 42–48 are 2.15 TB),
+and `solve` refuses to start a ply that cannot fit.
+
+7-row validation so far, before the 7×7 run:
+
+* 4×7 (draw) and 5×7 (draw): per-ply won/drawn/lost/terminal tables from `reachtally` match the
+  reference BDD solver's `results_solve` CSVs **exactly on every row** (29 and 36 plies,
+  135,385,909 and 14,171,315,454 positions; the reference counts for the side to move, so W/L
+  swap on odd plies). Counting DP = brute-force enumeration on 4×7; `selftest` and `bfcheck`
+  pass on both boards.
+* 6×7 count: 934,759,879,457 positions (not yet solved).
+* Base-3 vs 2-bit: identical decoded values on 6×4 and 5×5; 2-bit solves still reproduce the
+  published `checksums/` byte for byte on 4×4, 6×4 and 5×5.
+* In-ply checkpoints: 6×5 solves SIGKILLed at random 15–17 times (8–10 resumed mid-ply, one
+  run also with `--archive`) produce slabs and per-ply tallies identical to an uninterrupted run.
+
 ## Design
 
 * **Space** (per ply k): gravity stackings of k stones with ⌈k/2⌉ first-player stones and
@@ -61,14 +114,31 @@ solves the same game in 47 h / 128 GB; this pipeline solves and *tabulates* it i
 make                       # g++ -O3, C++20
 ./c4 count   [--board WxH] [--brute]     # pseudo-space counting DP (+ brute check)
 ./c4 buildzdd|solve [--board WxH]        # build forest (verifies vs DP), solve slabs
+     solve flags: [--pack 2|3] [--ckpt-min M] [--archive D]
 ./c4 probe <moveseq>       # e.g. ./c4 probe 332   ('-' = initial position)
 ./c4 analyze               # initial position + per-move values
 ./c4 selftest | bfcheck [n] | reachtally | bigtally   # validation suite
 ```
 
-Common flags: `--board WxH` (default 7×6; 4≤W≤7, 4≤H≤6), `--threads N`, `--dir D`. Tables
-are read and written under `c4_wdl_<W>x<H>/` **relative to the current working directory**,
-so the solver tree can be moved without editing source; `--dir D` overrides the location.
+Common flags: `--board WxH` (default 7×6; 4≤W≤7, 4≤H≤7), `--threads N`, `--dir D`,
+`--archive D`. Tables are read and written under `c4_wdl_<W>x<H>/` **relative to the current
+working directory**, so the solver tree can be moved without editing source; `--dir D`
+overrides the location. Readers look for a slab in `--dir` first, then in `--archive`.
+
+Solve-only flags:
+
+* `--pack 2|3` — slab packing: 2-bit (4 values per byte) or base-3 (5 values per byte, 20%
+  smaller). The default is 2-bit up to 42 cells (so 7×6 and smaller reproduce the published
+  tables) and base-3 above. A base-3 directory is marked by a `PACK_BASE3` file, which every
+  reader honours; a directory without it is 2-bit. Mixing packings in one directory is refused.
+* `--ckpt-min M` — checkpoint progress *within* a ply every M minutes (default 15). Each
+  checkpoint `msync`s the in-progress `.tmp` slab and then records which 327,680-position
+  chunks are complete in `slab_{ply}.bin.ckpt`, so a killed solve loses at most M minutes,
+  not the whole ply.
+* `--archive D` — once ply k is solved, ply k+1 is no longer needed, so it is moved (copy +
+  fsync + rename, then delete) to directory D in the background. This keeps only the working
+  pair on fast storage. At the end, `slab_0.bin`, `zdd.bin` and the marker are added too, so
+  D is a complete board directory usable with `--dir D`.
 
 Probe input is a move sequence in 0-indexed columns from the initial position. Output:
 board, side to move, WDL for the side to move, and per-move values.
@@ -88,7 +158,7 @@ make
 Replace `--board 4x4` with `6x4`, `5x5`, or `7x6`. `solve` writes `zdd.bin` plus one
 `slab_{ply}.bin` per ply into the board directory; it is **resumable** — each ply is written
 to `slab_{ply}.bin.tmp` and renamed on completion, so re-running the same command continues
-at the first missing ply.
+at the first missing ply, and from that ply's last in-ply checkpoint (see `--ckpt-min`).
 
 **On reproducibility.** The slab files are bit-for-bit reproducible: a fresh solve
 reproduces the `slab_*.bin` digests in `checksums/` exactly, regardless of thread count
@@ -157,8 +227,11 @@ cd c4_wdl_7x6 && sha256sum -c ../checksums/c4_wdl_7x6.SHA256SUMS
 The manifests cover `zdd.bin` too, so they fully verify an extracted download. They will not
 match a locally rebuilt `zdd.bin` — see the note above.
 
-Slab format: 2 bits per position indexed by the ply's ZDD rank (0 = draw, 1 = win, 2 = loss,
-from the side to move's perspective).
+Slab format: one value per position indexed by the ply's ZDD rank (0 = draw, 1 = win,
+2 = loss, from the side to move's perspective). The published tables are 2-bit: value i is
+bits `2·(i mod 4)` of byte `i/4`, and the file is padded to whole 8-byte words. Base-3
+tables (directories containing `PACK_BASE3`, the default above 42 cells) hold 5 values per
+byte: byte `i/5` = Σ v_j·3^j with j = i mod 5, file size ⌈n/5⌉ bytes.
 
 ### Rebuilding the archives
 
@@ -196,7 +269,7 @@ or to generate the tables from scratch.
 
 | file | contents |
 |---|---|
-| `c4.cpp`, `Makefile` | complete standalone solver and build recipe (~1,500 lines C++20) |
+| `c4.cpp`, `Makefile` | complete standalone solver and build recipe (~1,600 lines C++20) |
 | `README.md` | results, format documentation, build instructions, and command examples |
 | `checksums/c4_wdl_*.SHA256SUMS` | per-file SHA-256 manifests for the externally published tables |
 | `crosscheck.py` | random-position cross-check driver for the reference solver above |
