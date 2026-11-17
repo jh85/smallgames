@@ -1056,6 +1056,13 @@ struct C4Solver {
         u64 already = keep && stat(tmpPath(k).c_str(), &tst) == 0 ? (u64)tst.st_blocks * 512 : 0;
         u64 need = slabBytes(n) > already ? slabBytes(n) - already : 0;
         need += need / 50 + (1ull << 30);          // 2% + 1 GiB margin
+        // the mover may still be archiving slab k+2; its space frees within hours, long before
+        // this ply's sparse output grows that far. stat after statvfs, so a move finishing in
+        // between is under-counted (safe), never counted twice.
+        struct stat mst;
+        if (need > have && mover.joinable() && k + 2 <= CELLS &&
+            stat(st.local(k + 2).c_str(), &mst) == 0)
+          have += (u64)mst.st_blocks * 512;
         if (need > have)
           die("ply %d needs %.1f GB more in %s but only %.1f GB is free — free space or pass "
               "--archive DIR to move finished slabs elsewhere", k, need / 1e9, st.dir.c_str(), have / 1e9);
