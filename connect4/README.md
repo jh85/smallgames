@@ -70,7 +70,8 @@ Validation:
   * In-ply checkpoints: 6×5 solves were SIGKILLed at random times, 15–17 kills per run.
     They produced slabs and per-ply tallies identical to an uninterrupted run.
 
-Pipeline comparison:
+Pipeline comparison. The same code handles boards up to 7 rows; on 7 rows the ZDD key grows to 35
+bits, and column states to 8 bits (191 states without a vertical four):
 
 | | 7×6 | 7×7 |
 |---|---:|---:|
