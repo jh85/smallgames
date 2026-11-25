@@ -155,6 +155,58 @@ At the end, the archive directory is a complete board directory. Without `--arch
 4.1 TB free here lasts through about ply 42 (plies 42–48 are 2.15 TB), and `solve` refuses
 to start a ply that cannot fit. The 7×7 tables are not published yet.
 
+## Counting positions on larger boards
+
+Both counters count the solver's position space: gravity stackings of k stones, ⌈k/2⌉ of them the
+first player's, with no four-in-a-row, per ply k.
+
+* `c4 count` (the DP that validates every ZDD) keeps the full states of the last three columns. It
+  needs V³ × (cells)² / 2 counters, where V is the number of column states: 103 for 6 rows, 191 for
+  7, 353 for 8, 651 for 9, 1,199 for 10. So it is limited to 7 rows. It now accepts any width up to
+  16. It aborts if a counter overflows 64 bits (11×6 and 12×6 do), and refuses to start if its
+  arrays need more than 70% of the available memory. Its `--brute` check is now a pruned,
+  multi-threaded enumeration on a cell grid, which does not use the DP's four-check table.
+* `c4count` (new, `c4count.cpp`) uses a smaller exact frontier and handles any width and up to 15
+  rows. Every four that is still open after column c runs through column c. So the frontier only
+  needs, for each row of the last column, the cell's colour and the length (1–3) of the
+  same-colour run ending there in each of the three non-vertical directions. A run that can no
+  longer reach four (too close to the right edge, or it would leave the board) is dropped. A cell
+  with no live run counts as empty. Swapping the colours maps a frontier's counts (s, x, o) to
+  (s, o, x), so only one of each colour-swapped pair is stored. On 8×8 this frontier has 5.1 M
+  classes (2.56 M after the colour symmetry), where the window DP would have 353³ = 44 M.
+  Each class carries counts by (stones, first-player stones). Entries that can no longer end with x − o ∈ {0, 1} are pruned. `--total`
+  keeps only x − o, which gives the total and the even/odd-ply split with far less memory.
+  Counters are 64-bit with carry detection (abort on overflow), or 128-bit with `--u128`. The
+  final column is always 128-bit. `--dry` builds only the class sets and prints the memory each
+  column would need, so a run that would not fit is never started.
+
+Results (64 threads):
+
+| board | positions (plies 0 … W·H) | even plies | odd plies | time | peak RSS |
+|---|---:|---:|---:|---:|---:|
+| 7×7 | 90,623,793,528,223 | 46,021,970,172,979 | 44,601,823,355,244 | 12 s (8 threads) | 2 GB |
+| 8×8 | **417,463,023,357,531,633** | 211,478,988,957,859,201 | 205,984,034,399,672,432 | 89 s | 26 GB |
+| 9×9 | **4,628,636,911,454,659,846,219** | 2,339,498,033,962,726,497,837 | 2,289,138,877,491,933,348,382 | 922 s | 260 GB |
+| 10×10 | **126,901,140,897,114,578,023,472,903** | 64,021,759,324,358,966,065,266,459 | 62,879,381,572,755,611,958,206,444 | 1,818 s | 272 GB (`--total --u128`) |
+
+The per-ply counts for 8×8 and 9×9 are in `counts/c4_count_8x8.csv` and `counts/c4_count_9x9.csv`.
+On 9×9 the largest ply is 62 (3.58×10²⁰), past 64 bits. 10×10 has only the total and the
+even/odd split: 91.8 M classes, 270 GB in `--total --u128` mode. Per-ply counts for 10×10 would
+need over 1 TB, more than this machine has.
+
+Validation:
+
+* `c4count` equals `c4 count` **per ply** on every board from 4 to 12 columns with 4, 5 or 6 rows,
+  and on 4×7, 5×7 and 7×7. The exceptions are 11×6 and 12×6, where the `c4 count` total no
+  longer fits in 64 bits. The equal boards include 7×6 (2,637,477,442,337) and 7×7
+  (90,623,793,528,223), which the ZDD root counts also confirm. On 6×7, `c4count` gives
+  934,759,879,457, the same as `c4 count`.
+* `c4count --brute` (independent grid enumeration) agrees per ply on 4×4, 6×4, 8×4, 4×8 and 4×9.
+  `c4 count --brute` agrees on 8×4 and 5×6.
+* The three modes check each other. On 8×8, per-ply, per-ply without colour symmetry, and
+  `--total` give identical totals and even/odd splits. On 9×9, per-ply and `--total --u128` agree
+  exactly.
+
 ## Design
 
 * **Space** (per ply k): gravity stackings of k stones with ⌈k/2⌉ first-player stones and
@@ -179,8 +231,9 @@ to start a ply that cannot fit. The 7×7 tables are not published yet.
 ## Build & usage
 
 ```
-make                       # g++ -O3, C++20
-./c4 count   [--board WxH] [--brute]     # pseudo-space counting DP (+ brute check)
+make                       # g++ -O3, C++20; builds c4 and c4count
+./c4 count   [--board WxH] [--brute]     # pseudo-space counting DP (+ brute check); W up to 16
+./c4count W H [--total] [--u128] [--dry] [--brute]   # position counts for any W, and H up to 15
 ./c4 buildzdd|solve [--board WxH]        # build forest (verifies vs DP), solve slabs
      solve flags: [--pack 2|3] [--ckpt-min M] [--archive D]
 ./c4 probe <moveseq>       # e.g. ./c4 probe 332   ('-' = initial position)
@@ -188,7 +241,7 @@ make                       # g++ -O3, C++20
 ./c4 selftest | bfcheck [n] | reachtally | bigtally   # validation suite
 ```
 
-Common flags: `--board WxH` (default 7×6; 4≤W≤7, 4≤H≤7), `--threads N`, `--dir D`,
+Common flags: `--board WxH` (default 7×6; 4≤W≤7, 4≤H≤7; `count` accepts 4≤W≤16), `--threads N`, `--dir D`,
 `--archive D`. Tables are read and written under `c4_wdl_<W>x<H>/` **relative to the current
 working directory**, so the solver tree can be moved without editing source; `--dir D`
 overrides the location. Readers look for a slab in `--dir` first, then in `--archive`.
@@ -339,9 +392,11 @@ or to generate the tables from scratch.
 | file | contents |
 |---|---|
 | `c4.cpp`, `Makefile` | complete standalone solver and build recipe (~1,600 lines C++20) |
+| `c4count.cpp` | position counter for boards beyond the solver's 7-row limit (see *Counting positions on larger boards*) |
+| `counts/c4_count_*.csv` | per-ply position counts from `c4count` |
 | `README.md` | results, format documentation, build instructions, and command examples |
 | `checksums/c4_wdl_*.SHA256SUMS` | per-file SHA-256 manifests for the externally published tables |
 | `crosscheck.py` | random-position cross-check driver for the reference solver above |
 
-The compiled `c4` binary, run logs, the generated `c4_wdl_*/` directories, and the cloned
+The compiled `c4` and `c4count` binaries, run logs, the generated `c4_wdl_*/` directories, and the cloned
 reference repository are excluded by `.gitignore`.

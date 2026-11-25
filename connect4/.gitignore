@@ -1,5 +1,6 @@
 # Local build products
 /c4
+/c4count
 
 # Generated run and validation logs
 /*.log

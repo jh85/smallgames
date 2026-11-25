@@ -46,6 +46,7 @@
 #include <random>
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <unordered_map>
 #include <mutex>
 #include <condition_variable>
@@ -194,6 +195,19 @@ static CountResult countDP(int threads, bool verbose) {
   const u64 SP = CELLS + 1, XP = (CELLS + 1) / 2 + 1;
   const u64 WN = V * V * V, KS = WN * SP * XP;
   if (validList_[0] != 0) die("validList_[0] must be the empty column");
+  {  // refuse to start rather than drive the machine into memory pressure
+    u64 availKB = 0;
+    FILE* f = fopen("/proc/meminfo", "r");
+    char line[256];
+    while (f && fgets(line, sizeof line, f))
+      if (sscanf(line, "MemAvailable: %llu kB", (unsigned long long*)&availKB) == 1) break;
+    if (f) fclose(f);
+    double need = 2.0 * KS * 8;
+    if (verbose) printf("[count] DP arrays: 2 x %.1f GB\n", KS * 8 / 1e9);
+    if (availKB && need > 0.7 * availKB * 1024.0)
+      die("count needs %.1f GB but only %.1f GB is available", need / 1e9, availKB / 1048576.0);
+  }
+  std::atomic<bool> overflow{false};
   u64* dp = (u64*)bigalloc(KS * 8);
   u64* dp2 = (u64*)bigalloc(KS * 8);
   dp[0] = 1;                                     // window (0,0,0), s'=x'=0
@@ -218,7 +232,8 @@ static CountResult countDP(int threads, bool verbose) {
                 int D = validList_[d];
                 if (win4(A, B, Cc, D)) continue;
                 u64 nw = ((u64)b * V + cc) * V + d;
-                __atomic_fetch_add(&dp2[(nw * SP + sp2) * XP + xp2], cnt, __ATOMIC_RELAXED);
+                u64 old = __atomic_fetch_add(&dp2[(nw * SP + sp2) * XP + xp2], cnt, __ATOMIC_RELAXED);
+                if (old + cnt < old) overflow = true;
               }
             }
         }
@@ -249,46 +264,80 @@ static CountResult countDP(int threads, bool verbose) {
               if (!cnt) continue;
               int s = (int)sp + hgt_[A] + hgt_[B] + hgt_[Cc];
               int x = (int)xp + xcnt_[A] + xcnt_[B] + xcnt_[Cc];
-              if (x == (s + 1) / 2) acc[t][s] += cnt;
+              if (x == (s + 1) / 2) {
+                if (acc[t][s] + cnt < acc[t][s]) overflow = true;
+                acc[t][s] += cnt;
+              }
             }
         }
       });
     for (auto& x : th) x.join();
     for (int t = 0; t < threads; ++t)
-      for (int k = 0; k <= CELLS; ++k) res.perPly[k] += acc[t][k];
+      for (int k = 0; k <= CELLS; ++k) {
+        if (res.perPly[k] + acc[t][k] < res.perPly[k]) overflow = true;
+        res.perPly[k] += acc[t][k];
+      }
   }
-  for (int k = 0; k <= CELLS; ++k) res.total += res.perPly[k];
+  for (int k = 0; k <= CELLS; ++k) {
+    if (res.total + res.perPly[k] < res.total) overflow = true;
+    res.total += res.perPly[k];
+  }
+  if (overflow) die("count overflowed 64 bits on %dx%d", W, H);
   munmap(dp, KS * 8);
   munmap(dp2, KS * 8);
   return res;
 }
 
-// Brute-force pseudo count for small boards (validation of the DP).
-static void bruteCount(std::vector<u64>& perPly) {
+// Brute-force pseudo count for small boards (validation of the DP). Independent of the DP and of
+// win4_: it places whole columns on a cell grid, left to right, and checks the horizontal and
+// diagonal fours through each new column directly on the grid (vertical fours are excluded by
+// the column-state list). Depth-first with pruning, parallel over the first two columns.
+static void bruteCount(int threads, std::vector<u64>& perPly) {
+  const int nv = (int)validList_.size();
+  std::vector<std::vector<u64>> acc(threads, std::vector<u64>(CELLS + 1, 0));
+  std::atomic<int> ctr{0};
+  std::vector<std::thread> th;
+  for (int t = 0; t < threads; ++t)
+    th.emplace_back([&, t] {
+      std::vector<int> g(W * H);   // g[c*H+r]: 0 empty, 1 = O, 2 = X
+      auto at = [&](int c, int r) { return (c < 0 || r < 0 || r >= H) ? -1 : g[c * H + r]; };
+      auto fourAt = [&](int c) {   // any horizontal/diagonal four whose rightmost cell is in column c
+        for (int r = 0; r < H; ++r) {
+          int v = g[c * H + r];
+          if (!v) continue;
+          for (int dr = -1; dr <= 1; ++dr) {
+            int k = 1;
+            while (k < 4 && at(c - k, r - k * dr) == v) ++k;
+            if (k == 4) return true;
+          }
+        }
+        return false;
+      };
+      std::function<void(int, int, int)> rec = [&](int c, int s, int x) {
+        if (c == W) {
+          if (x == (s + 1) / 2) acc[t][s]++;
+          return;
+        }
+        for (int i = 0; i < nv; ++i) {
+          int D = validList_[i];
+          for (int r = 0; r < H; ++r) g[c * H + r] = cellOf(D, r);
+          if (!fourAt(c)) rec(c + 1, s + hgt_[D], x + xcnt_[D]);
+        }
+        for (int r = 0; r < H; ++r) g[c * H + r] = 0;
+      };
+      for (;;) {
+        int item = ctr.fetch_add(1);
+        if (item >= nv * nv) break;
+        int D0 = validList_[item / nv], D1 = validList_[item % nv];
+        std::fill(g.begin(), g.end(), 0);
+        for (int r = 0; r < H; ++r) g[r] = cellOf(D0, r), g[H + r] = cellOf(D1, r);
+        rec(2, hgt_[D0] + hgt_[D1], xcnt_[D0] + xcnt_[D1]);
+      }
+    });
+  for (auto& x : th) x.join();
   perPly.assign(CELLS + 1, 0);
-  std::vector<int> col(W, 0);
-  // iterate all W-tuples of valid states
-  std::vector<u64> local(CELLS + 1, 0);
-  size_t nv = validList_.size();
-  std::vector<size_t> idx(W, 0);
-  for (;;) {
-    // check windows
-    bool ok = true;
-    int s = 0, x = 0;
-    for (int c = 0; c < W && ok; ++c) {
-      int D = validList_[idx[c]];
-      s += hgt_[D]; x += xcnt_[D];
-      int A = c >= 3 ? validList_[idx[c - 3]] : 0;
-      int B = c >= 2 ? validList_[idx[c - 2]] : 0;
-      int Cc = c >= 1 ? validList_[idx[c - 1]] : 0;
-      if (win4(A, B, Cc, D)) ok = false;
-    }
-    if (ok && x == (s + 1) / 2) local[s]++;
-    int c = 0;
-    while (c < W && ++idx[c] == nv) { idx[c] = 0; ++c; }
-    if (c == W) break;
-  }
-  perPly = local;
+  for (int t = 0; t < threads; ++t)
+    for (int k = 0; k <= CELLS; ++k) perPly[k] += acc[t][k];
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1175,7 +1224,10 @@ int main(int argc, char** argv) {
     else if (a == "--brute") brute = true;
     else rest.push_back(a);
   }
-  if (w < 4 || w > 7 || h < 4 || h > 7) die("supported: 4<=W<=7, 4<=H<=7");
+  // count needs only the column-state tables, so it accepts any width; everything that builds
+  // or reads a ZDD forest is limited to W <= 7.
+  if (h < 4 || h > 7 || w < 4 || w > (cmd == "count" ? 16 : 7))
+    die("supported: 4<=W<=7, 4<=H<=7 (count: 4<=W<=16)");
   if (packReq != 0 && packReq != 2 && packReq != 3) die("--pack must be 2 or 3");
   initTables(w, h);
   initPack();
@@ -1225,7 +1277,7 @@ int main(int argc, char** argv) {
            commas(res.total).c_str(), tableBytes / 1e12, tableBytes / 1e9);
     if (brute) {
       std::vector<u64> bp;
-      bruteCount(bp);
+      bruteCount(threads, bp);
       bool ok = true;
       for (int k = 0; k <= CELLS; ++k)
         if (bp[k] != res.perPly[k]) ok = false;
