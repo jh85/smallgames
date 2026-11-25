@@ -1,6 +1,9 @@
 # Local build products
 /c4
 /c4count
+/c4pack
+/c4_wdl_query
+/*.progress
 
 # Generated run and validation logs
 /*.log
