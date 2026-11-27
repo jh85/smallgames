@@ -349,6 +349,20 @@ cd c4_wdl_7x6 && sha256sum -c ../checksums/c4_wdl_7x6.SHA256SUMS
 The manifests cover `zdd.bin` too, so they fully verify an extracted download. They will not
 match a locally rebuilt `zdd.bin` — see the note above.
 
+### 7×7 package
+
+The 7×7 tables are too large for one archive: 16.5 TiB raw. Instead they are packaged by
+`c4pack` as a directory of 55 files totalling 2,392,840,254,374 B (2.39 TB; the tables compress
+4.8–17.5×). Each table file is a zstd **seekable** file (`*.bin.zst`, independent 16 MiB
+frames plus a seek table). `c4_wdl_query.cpp`, included in the package, answers positions
+directly from the compressed files with ~9 GB of RAM. `make_c4_package.py` then adds the
+package README, `STATISTICS.csv` and `SHA256SUMS`. The package is not hosted yet. To verify it,
+run `sha256sum -c SHA256SUMS` inside it. Stock `zstd -d` restores the original files, and
+`checksums/c4_wdl_7x7.SHA256SUMS` verifies those as above. The package was checked against the
+solver's raw tables. Every compressed frame was decompressed and compared with its input when
+written. `c4_wdl_query` and `c4 probe` agree on the value and every move's value for random
+positions at plies 0–45.
+
 Slab format: one value per position indexed by the ply's ZDD rank (0 = draw, 1 = win,
 2 = loss, from the side to move's perspective). The published tables are 2-bit: value i is
 bits `2·(i mod 4)` of byte `i/4`, and the file is padded to whole 8-byte words. Base-3
@@ -396,6 +410,7 @@ or to generate the tables from scratch.
 | `counts/c4_count_*.csv` | per-ply position counts from `c4count` |
 | `README.md` | results, format documentation, build instructions, and command examples |
 | `checksums/c4_wdl_*.SHA256SUMS` | per-file SHA-256 manifests for the externally published tables |
+| `c4pack.cpp`, `c4_wdl_query.cpp`, `make_c4_package.py`, `package-README.md` | build, query and finish the compressed 7×7 package |
 | `crosscheck.py` | random-position cross-check driver for the reference solver above |
 
 The compiled `c4` and `c4count` binaries, run logs, the generated `c4_wdl_*/` directories, and the cloned

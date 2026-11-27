@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Finish a Connect Four WDL package written by c4pack.
 
-usage: make_c4_package.py PKG_DIR SOLVE_LOG W H
+usage: make_c4_package.py PKG_DIR SOLVE_LOG W H [MORE_LOGS...]
+
+MORE_LOGS are read first, so a resumed solve can supply plies its main log lacks.
 
 Adds to PKG_DIR: README.md (from package-README.md), STATISTICS.csv (per-ply W/D/L for the side to
 move, parsed from the solve log), c4_wdl_query.cpp, and SHA256SUMS of every file. Before it writes
@@ -11,7 +13,8 @@ which c4pack recorded from the bytes it wrote. It also prints the raw-table mani
 """
 import concurrent.futures, hashlib, os, re, shutil, sys
 
-pkg, log, W, H = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+pkg, W, H = sys.argv[1], int(sys.argv[3]), int(sys.argv[4])
+logs = sys.argv[5:] + [sys.argv[2]]
 here = os.path.dirname(os.path.abspath(__file__))
 cells = W * H
 
@@ -40,7 +43,7 @@ print('all %d .zst files match MANIFEST.tsv' % len(man))
 
 # per-ply statistics from the solve log (last entry per ply wins)
 plies = {}
-for l in open(log):
+for l in (l for log in logs for l in open(log)):
     r = re.match(r'\[ply\s*(\d+)\] n=([\d,]+)\s+W/D/L\(stm\) = ([\d,]+) / ([\d,]+) / ([\d,]+)', l)
     if r:
         plies[int(r[1])] = [int(x.replace(',', '')) for x in r.groups()[1:]]
