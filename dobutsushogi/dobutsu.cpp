@@ -1,6 +1,13 @@
-// dobutsu.cpp — Strong solver for 4x3 through 8x3 Dobutsu Shogi (animal shogi) via a
+// dobutsu.cpp — Strong solver for 4x3 through 9x3 Dobutsu Shogi (animal shogi) via a
 // ZDD minimal perfect hash + retrograde analysis, following the architecture of NOCCA x NOCCA
 // solver (Yamamoto & Hoki, GPW 2022) with a hand-piece extension.
+//
+// Two solvers produce the same table. 'solve' is a frontier-driven retrograde analysis:
+// only the positions decided in the previous pass are expanded (through un-move
+// generation), so the work is proportional to the number of decided positions rather
+// than to passes x undecided positions. 'solve-forward' is the original algorithm, which
+// re-evaluates every undecided position in every pass; it is kept as an independent
+// cross-check.
 //
 // Position space ("pseudo-reachable", black to move canonically):
 //   - R x 3 board, rows 0 (top, White's home) .. R-1 (bottom, Black's home). Black
@@ -50,6 +57,8 @@
 #include <unordered_map>
 #include <atomic>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <random>
 #include <algorithm>
@@ -58,6 +67,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 using u8 = uint8_t;  using u16 = uint16_t; using u32 = uint32_t; using u64 = uint64_t;
@@ -90,9 +100,9 @@ static double now_s() {
 // Board and piece tables. States: 0 empty; 1..5 black L,E,G,C,H; 6..10 white L,E,G,C,H.
 // ------------------------------------------------------------------------------------------
 // Board geometry and representation limits. All fixed-size storage is derived from these
-// constants. Attack masks and the independent u128 checker both safely cover an 8x3 board.
+// constants. Attack masks and the independent u128 checker both safely cover a 9x3 board.
 static constexpr int C = 3;
-static constexpr int MIN_R = 4, MAX_R = 8;
+static constexpr int MIN_R = 4, MAX_R = 9;
 static constexpr int PIECE_STATES = 10;  // non-empty states: black/white L,E,G,C,H
 static constexpr int PIECE_KINDS = PIECE_STATES / 2;
 static constexpr int BOARD_STATE_COUNT = PIECE_STATES + 1;  // including empty
@@ -119,6 +129,7 @@ static int NITEMS = NBOARD_ITEMS + HAND_ITEMS, ARR = S + HAND_ITEMS;
 
 static int rowOf_[MAXS], flipSq_[MAXS], mirSq_[MAXS], swapSt_[BOARD_STATE_COUNT];
 static std::vector<u8> MOV[PIECE_KINDS + 1][MAXS];  // black states 1..PIECE_KINDS
+static std::vector<u8> RMOV[PIECE_KINDS + 1][MAXS]; // inverse: squares q with t in MOV[s][q]
 static u32 ATT[BOARD_STATE_COUNT][MAXS];             // bit t: state attacks square t
 
 struct Off { int dr, dc; };
@@ -136,7 +147,7 @@ static void initTables(int rows) {
   NITEMS = NBOARD_ITEMS + HAND_ITEMS;
   ARR = S + HAND_ITEMS;
   for (int k = 0; k <= PIECE_KINDS; ++k)
-    for (int q = 0; q < MAXS; ++q) MOV[k][q].clear();
+    for (int q = 0; q < MAXS; ++q) { MOV[k][q].clear(); RMOV[k][q].clear(); }
   for (int q = 0; q < S; ++q) {
     int r = q / C, c = q % C;
     rowOf_[q] = r;
@@ -174,6 +185,9 @@ static void initTables(int rows) {
       ATT[s][q] = m;
     }
   }
+  for (int s = 1; s <= PIECE_KINDS; ++s)
+    for (int q = 0; q < S; ++q)
+      for (u8 t : MOV[s][q]) RMOV[s][t].push_back((u8)q);
 }
 
 // Left/right reflection leaves hand contents unchanged.  Reduced tables choose the
@@ -577,6 +591,608 @@ static bool gameAlreadyOver(const u8* arr) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Signature-indexed ranking.
+//
+// The ZDD rank of a position is the number of members that precede it in the ZDD's order:
+// square by square, where at one square the states are ordered empty, 10, 9, ..., 1, and
+// finally the hand counts in ascending E, G, C order. The number of completions of a
+// prefix depends only on a small signature of that prefix — (black lion placed, white
+// lion placed, #E, #G, #C on the board) and, in reflection-reduced mode, whether an
+// earlier row already decided left < right plus the state of the current row's left
+// square. The rank is therefore the sum of one table entry per square. This yields exactly
+// the ZDD's ranks, but without chasing about ten ZDD nodes per square, and the table
+// addresses do not depend on earlier loads. The tables come from an independent DP and are
+// cross-checked against the ZDD by 'selftest'.
+// ------------------------------------------------------------------------------------------
+static constexpr int NSIG = 4 * 27;                // lb | lw << 1 | (nE + 3 nG + 9 nC) << 2
+static constexpr int NVAR_LR = 2 + PIECE_STATES;   // 0: already less; 1 + left: still tied
+static const u8 SIG_DELTA[BOARD_STATE_COUNT] = {0, 1, 4, 12, 36, 36, 2, 4, 12, 36, 36};
+
+struct SigRank {
+  bool lr = false;
+  int nv = 1;
+  size_t sqStride = 0;       // table entries per square: nv * NSIG * BOARD_STATE_COUNT
+  std::vector<u64> T;        // [S][nv][NSIG][state]: members preceding `state` at a square
+  std::vector<u64> CNT;      // [S + 1][nv][NSIG]: completions of a prefix
+  u64 total = 0;
+  u8 handM1[NSIG], handM2[NSIG], handN[NSIG];
+  u8 handOf[NSIG][27][HAND_TYPES];   // hand counts for a hand rank, avoiding divisions
+
+  u64& cnt(int q, int v, int b) { return CNT[((size_t)q * nv + v) * NSIG + b]; }
+  u64 cnt(int q, int v, int b) const { return CNT[((size_t)q * nv + v) * NSIG + b]; }
+  const u64* row(int q, int v, int b) const {
+    return &T[(size_t)q * sqStride + ((size_t)v * NSIG + b) * BOARD_STATE_COUNT];
+  }
+
+  // Signature after placing state s at square q; false if the piece cannot be placed.
+  static bool place(int q, int b, int s, int& b2) {
+    int n = b >> 2;
+    bool ok;
+    int delta = SIG_DELTA[s];
+    switch (s) {
+      case 0: ok = true; break;
+      case 1: ok = !(b & 1) && rowOf_[q] != 0; break;
+      case 6: ok = !(b & 2); break;
+      case 2: case 7: ok = n % 3 < PIECES_PER_TYPE; break;
+      case 3: case 8: ok = n / 3 % 3 < PIECES_PER_TYPE; break;
+      default: ok = n / 9 < PIECES_PER_TYPE; break;
+    }
+    b2 = b + delta;
+    return ok;
+  }
+
+  // Reflection variant after state s at square q. Returns false when the position stops
+  // being the selected member of its orbit (left > right in the first unequal row).
+  bool nextVar(int q, int v, int s, int& v2) const {
+    v2 = 0;
+    if (!lr) return true;
+    int col = q % C;
+    if (col == 0) { v2 = v ? 1 + s : 0; return true; }
+    if (col < C - 1) { v2 = v; return true; }
+    if (!v) return true;
+    int left = v - 1;
+    if (s < left) return false;
+    v2 = s == left ? 1 : 0;
+    return true;
+  }
+
+  void build(bool reduced) {
+    lr = reduced;
+    nv = lr ? NVAR_LR : 1;
+    sqStride = (size_t)nv * NSIG * BOARD_STATE_COUNT;
+    T.assign((size_t)S * sqStride, 0);
+    CNT.assign((size_t)(S + 1) * nv * NSIG, 0);
+    for (int b = 0; b < NSIG; ++b) {
+      int nE = (b >> 2) % 3, nG = (b >> 2) / 3 % 3, nC = (b >> 2) / 9;
+      handM2[b] = (u8)(PIECES_PER_TYPE + 1 - nC);
+      handM1[b] = (u8)((PIECES_PER_TYPE + 1 - nG) * (PIECES_PER_TYPE + 1 - nC));
+      handN[b] = (u8)((PIECES_PER_TYPE + 1 - nE) * handM1[b]);
+      for (int h = 0; h < 27; ++h) {
+        handOf[b][h][0] = (u8)(h / handM1[b]);
+        handOf[b][h][1] = (u8)(h % handM1[b] / handM2[b]);
+        handOf[b][h][2] = (u8)(h % handM2[b]);
+      }
+      if ((b & 3) == 3)
+        for (int v = 0; v < std::min(nv, 2); ++v) cnt(S, v, b) = handN[b];
+    }
+    for (int q = S - 1; q >= 0; --q)
+      for (int v = 0; v < nv; ++v) {
+        if (lr && q % C == 0 && v > 1) continue;   // the left square only has two variants
+        for (int b = 0; b < NSIG; ++b) {
+          u64* out = &T[(size_t)q * sqStride + ((size_t)v * NSIG + b) * BOARD_STATE_COUNT];
+          u128 acc = 0;
+          for (int j = 0; j <= PIECE_STATES; ++j) {
+            int s = j == 0 ? 0 : PIECE_STATES + 1 - j;   // ZDD order: empty, 10, 9, ..., 1
+            out[s] = (u64)acc;
+            int b2, v2;
+            if (place(q, b, s, b2) && nextVar(q, v, s, v2)) acc += cnt(q + 1, v2, b2);
+          }
+          if (acc > std::numeric_limits<u64>::max())
+            die("position count exceeds the 64-bit rank representation");
+          cnt(q, v, b) = (u64)acc;
+        }
+      }
+    total = cnt(0, lr ? 1 : 0, 0);
+  }
+
+  // Sum the table entries of rows r0..R-1 of the board `a` and add the hand rank. (k, b,
+  // tied) describe the prefix above row r0. `a` must be the selected orbit member.
+  inline u64 rankRows(const u8* a, int r0, u64 k, u32 b, u32 tied, const int* hand) const {
+    const size_t st = sqStride;
+    const u64* t = T.data() + (size_t)r0 * C * st;
+    for (int q = r0 * C; q < S; q += C, t += C * st) {
+      u32 l = a[q], m = a[q + 1], r = a[q + 2];
+      u32 v = tied * (1 + l);
+      k += t[(tied * NSIG + b) * BOARD_STATE_COUNT + l];
+      b += SIG_DELTA[l];
+      k += t[st + (v * NSIG + b) * BOARD_STATE_COUNT + m];
+      b += SIG_DELTA[m];
+      k += t[2 * st + (v * NSIG + b) * BOARD_STATE_COUNT + r];
+      b += SIG_DELTA[r];
+      tied &= (u32)(l == r);
+    }
+    return k + (u64)hand[0] * handM1[b] + (u64)hand[1] * handM2[b] + (u64)hand[2];
+  }
+
+  u64 rank(const u8* arr) const {
+    int hb[HAND_TYPES];
+    handCounts(arr, hb);
+    return rankRows(arr, 0, 0, 0, lr ? 1 : 0, hb);
+  }
+};
+static_assert(C == 3, "SigRank::rankRows is written for three columns");
+
+// Position iterator over ranks. seek() costs time proportional to the number of trailing
+// squares that differ from the current position, so both dense scans and sparse jumps are
+// cheap. kpre[q]..kend[q] is the rank interval sharing the current squares 0..q-1; in
+// particular [kpre[S], kend[S]) are the ranks that share the whole board.
+struct SigIter {
+  const SigRank* sr = nullptr;
+  u8 pos[MAXARR];
+  u64 kpre[MAXS + 1], kend[MAXS + 1];
+  u8 sig[MAXS + 1], var[MAXS + 1];
+
+  void init(const SigRank& s) {
+    sr = &s;
+    memset(pos, 0, sizeof pos);
+    for (int q = 1; q <= S; ++q) { kpre[q] = 1; kend[q] = 0; }   // empty intervals
+    kpre[0] = 0; kend[0] = s.total; sig[0] = 0; var[0] = s.lr ? 1 : 0;
+  }
+
+  void seek(u64 k) {
+    int q = S;
+    while (k < kpre[q] || k >= kend[q]) --q;
+    u64 r = k - kpre[q];
+    for (; q < S; ++q) {
+      const u64* row = sr->row(q, var[q], sig[q]);
+      int c = 0;
+      for (int s = 1; s <= PIECE_STATES; ++s) c += row[s] <= r;
+      int s = c ? PIECE_STATES + 1 - c : 0;
+      pos[q] = (u8)s;
+      r -= row[s];
+      int v2;
+      sr->nextVar(q, var[q], s, v2);
+      kpre[q + 1] = k - r;
+      sig[q + 1] = (u8)(sig[q] + SIG_DELTA[s]);
+      var[q + 1] = (u8)v2;
+      kend[q + 1] = kpre[q + 1] + sr->cnt(q + 1, v2, sig[q + 1]);
+    }
+    const u8* h = sr->handOf[sig[S]][k - kpre[S]];
+    pos[S + 0] = h[0] >= 1; pos[S + 1] = h[0] >= 2;
+    pos[S + 2] = h[1] >= 1; pos[S + 3] = h[1] >= 2;
+    pos[S + 4] = h[2] >= 1; pos[S + 5] = h[2] >= 2;
+  }
+};
+
+// Ranks boards that differ from a base board in one or two squares. The per-row prefix
+// sums of the base are kept for both orientations (each computed on first use), so a
+// modified board is ranked by summing only from its first changed row, in whichever
+// orientation is the selected member of its orbit.
+struct RankCtx {
+  const SigRank* sr = nullptr;
+  u8 w[2][MAXS];                 // the base board and its mirror image
+  bool has[2];
+  u64 kRow[2][MAX_R];
+  u32 bRow[2][MAX_R], tRow[2][MAX_R];
+  int8_t cmp[MAX_R];             // sign(left - right) per row of the base
+  u8 nextDiff[MAX_R + 2];        // first row >= r with cmp != 0, or R
+
+  // An orientation that is not the selected member has meaningless sums below its first
+  // violating row. They are never used: a modified board that is the selected member in
+  // some orientation shares that orientation's rows above its first change, so those rows
+  // contain no violation.
+  void prefix(int o) {
+    const size_t st = sr->sqStride;
+    const u64* t = sr->T.data();
+    const u8* a = w[o];
+    u64 k = 0;
+    u32 b = 0, tied = sr->lr ? 1 : 0;
+    for (int r = 0, q = 0; r < R; ++r, q += C, t += C * st) {
+      kRow[o][r] = k; bRow[o][r] = b; tRow[o][r] = tied;
+      u32 l = a[q], m = a[q + 1], rt = a[q + 2];
+      u32 v = tied * (1 + l);
+      k += t[(tied * NSIG + b) * BOARD_STATE_COUNT + l];
+      b += SIG_DELTA[l];
+      k += t[st + (v * NSIG + b) * BOARD_STATE_COUNT + m];
+      b += SIG_DELTA[m];
+      k += t[2 * st + (v * NSIG + b) * BOARD_STATE_COUNT + rt];
+      b += SIG_DELTA[rt];
+      tied &= (u32)(l == rt);
+    }
+    has[o] = true;
+  }
+
+  void build(const u8* base) {
+    memcpy(w[0], base, S);
+    has[0] = has[1] = false;
+    if (!sr->lr) return;
+    for (int q = 0; q < S; ++q) w[1][mirSq_[q]] = base[q];
+    nextDiff[R] = nextDiff[R + 1] = (u8)R;
+    for (int r = R - 1; r >= 0; --r) {
+      int l = base[r * C], rt = base[r * C + C - 1];
+      cmp[r] = (int8_t)((l > rt) - (l < rt));
+      nextDiff[r] = cmp[r] ? (u8)r : nextDiff[r + 1];
+    }
+  }
+
+  // sign(left - right) of row r of the base with squares q1 := s1 and q2 := s2
+  inline int rowSign(int r, int q1, int s1, int q2, int s2) const {
+    int ql = r * C, qr = ql + C - 1;
+    int l = w[0][ql], rt = w[0][qr];
+    if (q1 == ql) l = s1; else if (q1 == qr) rt = s1;
+    if (q2 == ql) l = s2; else if (q2 == qr) rt = s2;
+    return (l > rt) - (l < rt);
+  }
+
+  // 1 if the modified base (changed rows r1 <= r2) must be mirrored to be the selected
+  // member of its orbit.
+  inline int orient(int r1, int r2, int q1, int s1, int q2, int s2) const {
+    if (!sr->lr) return 0;
+    int nd = nextDiff[0];
+    if (nd < r1) return cmp[nd] > 0;
+    int sign = rowSign(r1, q1, s1, q2, s2);
+    if (sign) return sign > 0;
+    if (r2 != r1) {
+      nd = nextDiff[r1 + 1];
+      if (nd < r2) return cmp[nd] > 0;
+      sign = rowSign(r2, q1, s1, q2, s2);
+      if (sign) return sign > 0;
+    }
+    nd = nextDiff[r2 + 1];
+    return nd < R && cmp[nd] > 0;
+  }
+
+  // Rank of the base with squares q1 := s1 and q2 := s2 (q2 < 0: one square only) and the
+  // given explicit hand.
+  inline u64 rank2(int q1, u8 s1, int q2, u8 s2, const int* hand) {
+    int r1 = rowOf_[q1], r2 = q2 < 0 ? r1 : rowOf_[q2];
+    if (r1 > r2) std::swap(r1, r2);
+    int o = orient(r1, r2, q1, s1, q2, s2);
+    if (!has[o]) prefix(o);
+    u8* a = w[o];
+    if (o) { q1 = mirSq_[q1]; if (q2 >= 0) q2 = mirSq_[q2]; }
+    if (q2 < 0) q2 = q1, s2 = s1;
+    u8 old1 = a[q1], old2 = a[q2];
+    a[q1] = s1; a[q2] = s2;
+    u64 k = sr->rankRows(a, r1, kRow[o][r1], bRow[o][r1], tRow[o][r1], hand);
+    a[q1] = old1; a[q2] = old2;
+    return k;
+  }
+  inline u64 rank1(int q, u8 s, const int* hand) { return rank2(q, s, -1, 0, hand); }
+};
+
+// An upper bound on the number of moves: 36 board moves plus 3 x 25 drops.
+static constexpr int MAX_KIDS = 128;
+
+// The legal moves of the side to move, expressed as changes to the child's base board f
+// (the position with rows flipped and colours swapped): a board move empties f1 and puts
+// `state` on f2; a drop (f1 == f2) puts `state` on f1. Every child has the explicit hand
+// hw, the opponent's hand, which no move changes.
+struct KidMove { u8 f1, f2, state; };
+
+struct MoveList {
+  int n;
+  bool any;                  // a legal move exists, counting those left out by skipWon
+  int hw[HAND_TYPES];
+  u8 f[MAXS];
+  KidMove m[MAX_KIDS];
+};
+
+// Lists the moves of `arr` (black to move) in a fixed order. With skipWon, moves after
+// which the opponent can capture the mover's lion at once are left out: pass 1 decided
+// every such child as a win for the opponent, so the solver needs no lookup for them.
+static void listMoves(const u8* arr, bool skipWon, MoveList& L) {
+  static const u8 TYPE_OF[BOARD_STATE_COUNT] = {3, 3, 0, 1, 2, 2, 3, 0, 1, 2, 2};
+  int on[HAND_TYPES + 1] = {0, 0, 0, 0}, hb[HAND_TYPES];
+  u8 mine[MAXS], theirs[MAXS], empty[MAXS];
+  int nm = 0, nt = 0, ne = 0, bl = -1;
+  u32 attW = 0;
+  for (int q = 0; q < S; ++q) {
+    int s = arr[q];
+    L.f[flipSq_[q]] = (u8)swapSt_[s];
+    ++on[TYPE_OF[s]];
+    if (!s) empty[ne++] = (u8)q;
+    else if (s <= PIECE_KINDS) { mine[nm++] = (u8)q; if (s == 1) bl = q; }
+    else { theirs[nt++] = (u8)q; attW |= ATT[s][q]; }
+  }
+  handCounts(arr, hb);
+  for (int t = 0; t < HAND_TYPES; ++t) L.hw[t] = PIECES_PER_TYPE - on[t] - hb[t];
+  u32 checkers = 0;          // squares of the white pieces attacking the black lion
+  if (!skipWon) attW = 0;
+  else if ((attW >> bl) & 1)
+    for (int i = 0; i < nt; ++i) {
+      int q = theirs[i];
+      if ((ATT[arr[q]][q] >> bl) & 1) checkers |= (u32)1 << q;
+    }
+  int n = 0;
+  bool any = false;
+  for (int i = 0; i < nm; ++i) {
+    int q = mine[i], s = arr[q];
+    for (u8 t : MOV[s][q]) {
+      int tt = arr[t];
+      if (tt >= 1 && tt <= 6) continue;            // own piece or white lion
+      any = true;
+      // A piece never attacks its own square, so attW already excludes a captured piece
+      // for lion moves; for other moves the captured checker is masked out.
+      if (s == 1 ? (attW >> t) & 1 : (checkers & ~((u32)1 << t)) != 0) continue;
+      if (n == MAX_KIDS) die("more than %d moves", MAX_KIDS);
+      int ns = (s == 4 && rowOf_[t] == 0) ? 5 : s;
+      L.m[n++] = {(u8)flipSq_[q], (u8)flipSq_[t], (u8)(ns + PIECE_KINDS)};
+    }
+  }
+  for (int type = 0; type < HAND_TYPES; ++type) {
+    if (!hb[type] || !ne) continue;
+    any = true;
+    if (checkers) break;                           // a drop never answers a check
+    u8 dropped = (u8)(2 + type + PIECE_KINDS);     // after the flip: white E/G/C
+    for (int i = 0; i < ne; ++i) {
+      if (n == MAX_KIDS) die("more than %d moves", MAX_KIDS);
+      u8 fq = (u8)flipSq_[empty[i]];
+      L.m[n++] = {fq, fq, dropped};
+    }
+  }
+  L.n = n; L.any = any;
+}
+
+// cx must have been built on L.f.
+static inline u64 rankMove(RankCtx& cx, const MoveList& L, int i) {
+  const KidMove& m = L.m[i];
+  return m.f1 == m.f2 ? cx.rank1(m.f1, m.state, L.hw)
+                      : cx.rank2(m.f1, 0, m.f2, m.state, L.hw);
+}
+
+// Ranks of the first `limit` children of `arr` as selected orbit members; `complete`
+// tells whether those were all of them.
+static int genChildren(const u8* arr, RankCtx& cx, u64* out, int limit, bool skipWon,
+                       bool& complete, bool& any) {
+  MoveList L;
+  listMoves(arr, skipWon, L);
+  any = L.any;
+  complete = L.n <= limit;
+  int n = std::min(L.n, limit);
+  if (n) cx.build(L.f);
+  for (int i = 0; i < n; ++i) out[i] = rankMove(cx, L, i);
+  return n;
+}
+
+// Ranks of the predecessors of `arr`: every position Y, not already won by capturing the
+// lion, from which one black move leads to `arr` (up to reflection). This is the exact
+// inverse of genChildren, which 'selftest' verifies in both directions. With Z the
+// position after the move seen from the mover's side (rows flipped, colours swapped), a
+// mover's piece is moved back to an empty source square — optionally restoring a captured
+// piece from the mover's hand — or is taken back into the hand if it could have been
+// dropped. Predecessors in which another mover's piece attacks the opposing lion are
+// skipped without ranking: pass 1 decided them as wins.
+template <class Emit>
+static inline void genPreds(const u8* arr, RankCtx& cx, Emit&& emit) {
+  int hb[HAND_TYPES], hw[HAND_TYPES];
+  handCounts(arr, hb);
+  whiteHand(arr, hb, hw);            // hw: the mover's hand after the move
+  u8 z[MAXS], mover[MAXS];
+  int nm = 0, wl = -1, bl = -1;
+  for (int q = 0; q < S; ++q) z[flipSq_[q]] = (u8)swapSt_[arr[q]];
+  for (int q = 0; q < S; ++q) {
+    int s = z[q];
+    if (s == 6) wl = q;
+    else if (s >= 1 && s <= PIECE_KINDS) { mover[nm++] = (u8)q; if (s == 1) bl = q; }
+  }
+  int natt = 0;
+  for (int i = 0; i < nm; ++i) natt += (ATT[z[mover[i]]][mover[i]] >> wl) & 1;
+  if (natt >= 2) return;             // an attacker remains whichever piece is moved back
+  bool lionFar = rowOf_[bl] == 0;    // only the lion itself can have just arrived there
+  bool built = false;
+  for (int i = 0; i < nm; ++i) {
+    int t = mover[i], s = z[t];
+    if (natt - (int)((ATT[s][t] >> wl) & 1) > 0) continue;
+    if (lionFar && s != 1) continue;
+    if (!built) { cx.build(z); built = true; }
+    if (s >= 2 && s <= 4) {          // un-drop
+      int h[HAND_TYPES] = {hw[0], hw[1], hw[2]};
+      ++h[s - 2];
+      emit(cx.rank1(t, 0, h));
+    }
+    auto from = [&](int so, int q) {
+      if (z[q] || (so == 1 && rowOf_[q] == 0) || ((ATT[so][q] >> wl) & 1)) return;
+      emit(cx.rank2(q, (u8)so, t, 0, hw));
+      for (int type = 0; type < HAND_TYPES; ++type) {
+        if (!hw[type]) continue;
+        int h[HAND_TYPES] = {hw[0], hw[1], hw[2]};
+        --h[type];
+        emit(cx.rank2(q, (u8)so, t, (u8)(2 + type + PIECE_KINDS), h));
+        if (type == 2) emit(cx.rank2(q, (u8)so, t, (u8)PIECE_STATES, h));  // captured hen
+      }
+    };
+    if (s == 4) {                    // a chick on the far rank can only have been dropped
+      if (rowOf_[t] != 0 && t + C < S) from(4, t + C);
+    } else {
+      for (u8 q : RMOV[s][t]) from(s, q);
+      if (s == 5 && rowOf_[t] == 0) from(4, t + C);   // promotion on arrival
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------------------
+// Bulk table I/O and small bit helpers.
+// ------------------------------------------------------------------------------------------
+static void preadAllAt(int fd, void* dst, size_t bytes, off_t offset, const char* what) {
+  size_t done = 0;
+  while (done < bytes) {
+    ssize_t n = pread(fd, (u8*)dst + done, bytes - done, offset + (off_t)done);
+    if (n <= 0) die("%s read failed", what);
+    done += (size_t)n;
+  }
+}
+
+static void pwriteAllAt(int fd, const void* src, size_t bytes, off_t offset,
+                        const char* what) {
+  size_t done = 0;
+  while (done < bytes) {
+    ssize_t n = pwrite(fd, (const u8*)src + done, bytes - done, offset + (off_t)done);
+    if (n <= 0) die("%s write failed", what);
+    done += (size_t)n;
+  }
+}
+
+static void syncCurrentDirectory() {
+  int fd = open(".", O_RDONLY | O_DIRECTORY);
+  if (fd >= 0) { fsync(fd); close(fd); }
+}
+
+static u32 compressEvenBits(u64 x) {
+  x &= 0x5555555555555555ull;
+  x = (x | (x >> 1)) & 0x3333333333333333ull;
+  x = (x | (x >> 2)) & 0x0f0f0f0f0f0f0f0full;
+  x = (x | (x >> 4)) & 0x00ff00ff00ff00ffull;
+  x = (x | (x >> 8)) & 0x0000ffff0000ffffull;
+  x = (x | (x >> 16)) & 0x00000000ffffffffull;
+  return (u32)x;
+}
+
+static u64 spreadEvenBits(u32 x) {
+  u64 v = x;
+  v = (v | (v << 16)) & 0x0000ffff0000ffffull;
+  v = (v | (v << 8)) & 0x00ff00ff00ff00ffull;
+  v = (v | (v << 4)) & 0x0f0f0f0f0f0f0f0full;
+  v = (v | (v << 2)) & 0x3333333333333333ull;
+  v = (v | (v << 1)) & 0x5555555555555555ull;
+  return v;
+}
+
+// Large tables are transferred in parallel pieces. Block-aligned pieces bypass the page
+// cache (O_DIRECT) when the file system allows it, so a multi-hundred-gigabyte checkpoint
+// does not compete for memory with the tables it is saving.
+static constexpr u64 IO_PIECE_WORDS = 1ull << 22;   // 32 MiB
+static constexpr size_t IO_ALIGN = 4096;
+static constexpr int IO_THREADS = 16;
+
+template <class Fn>
+static void runThreads(int n, Fn&& fn) {
+  std::vector<std::thread> pool;
+  for (int t = 1; t < n; ++t) pool.emplace_back([&fn, t] { fn(t); });
+  fn(0);
+  for (auto& th : pool) th.join();
+}
+
+// fill(firstWord, count, dst) produces the words to write.
+template <class Fill>
+static void bulkWriteWords(const std::string& path, off_t offset, u64 nwords, Fill&& fill) {
+  int fdB = open(path.c_str(), O_WRONLY);
+  if (fdB < 0) die("cannot open %s for writing", path.c_str());
+  int fdD = offset % (off_t)IO_ALIGN == 0 ? open(path.c_str(), O_WRONLY | O_DIRECT) : -1;
+  u64 pieces = nwords / IO_PIECE_WORDS + (nwords % IO_PIECE_WORDS != 0);
+  std::atomic<u64> next{0};
+  runThreads((int)std::min<u64>(IO_THREADS, std::max<u64>(pieces, 1)), [&](int) {
+    void* mem = nullptr;
+    if (posix_memalign(&mem, IO_ALIGN, IO_PIECE_WORDS * sizeof(u64))) die("out of memory");
+    for (;;) {
+      u64 p = next.fetch_add(1, std::memory_order_relaxed);
+      if (p >= pieces) break;
+      u64 first = p * IO_PIECE_WORDS, count = std::min(IO_PIECE_WORDS, nwords - first);
+      fill(first, count, (u64*)mem);
+      size_t bytes = count * sizeof(u64);
+      off_t at = offset + (off_t)(first * sizeof(u64));
+      if (fdD >= 0 && bytes % IO_ALIGN == 0
+          && pwrite(fdD, mem, bytes, at) == (ssize_t)bytes)
+        continue;
+      pwriteAllAt(fdB, mem, bytes, at, "table");
+    }
+    free(mem);
+  });
+  if (fdD >= 0) close(fdD);
+  if (fsync(fdB)) die("fsync failed");
+  close(fdB);
+}
+
+// dst must be page-aligned (the tables are mmap()ed).
+static void bulkReadWords(const std::string& path, off_t offset, u64* dst, u64 nwords) {
+  int fdB = open(path.c_str(), O_RDONLY);
+  if (fdB < 0) die("cannot open %s", path.c_str());
+  int fdD = offset % (off_t)IO_ALIGN == 0 ? open(path.c_str(), O_RDONLY | O_DIRECT) : -1;
+  u64 pieces = nwords / IO_PIECE_WORDS + (nwords % IO_PIECE_WORDS != 0);
+  std::atomic<u64> next{0};
+  runThreads((int)std::min<u64>(IO_THREADS, std::max<u64>(pieces, 1)), [&](int) {
+    for (;;) {
+      u64 p = next.fetch_add(1, std::memory_order_relaxed);
+      if (p >= pieces) break;
+      u64 first = p * IO_PIECE_WORDS, count = std::min(IO_PIECE_WORDS, nwords - first);
+      size_t bytes = count * sizeof(u64);
+      off_t at = offset + (off_t)(first * sizeof(u64));
+      if (fdD >= 0 && bytes % IO_ALIGN == 0
+          && pread(fdD, dst + first, bytes, at) == (ssize_t)bytes)
+        continue;
+      preadAllAt(fdB, dst + first, bytes, at, "table");
+    }
+  });
+  if (fdD >= 0) close(fdD);
+  close(fdB);
+}
+
+// Spread the big tables over all NUMA nodes: they are accessed at random by every thread
+// and do not fit on one node at the largest board sizes. Best effort.
+static void interleaveMemory() {
+#if defined(__linux__) && defined(SYS_set_mempolicy)
+  FILE* f = fopen("/sys/devices/system/node/online", "r");
+  if (!f) return;
+  char buf[256] = {0};
+  bool ok = fgets(buf, sizeof buf, f) != nullptr;
+  fclose(f);
+  if (!ok) return;
+  unsigned long mask[16] = {0};
+  const int maxNode = (int)(sizeof mask * 8);
+  int nodes = 0;
+  for (char* p = buf; *p && *p != '\n';) {
+    char* e;
+    long a = strtol(p, &e, 10), b = a;
+    if (e == p) return;
+    if (*e == '-') { p = e + 1; b = strtol(p, &e, 10); if (e == p) return; }
+    for (long i = a; i <= b && i < maxNode; ++i) {
+      mask[i / (8 * sizeof(long))] |= 1ul << (i % (8 * sizeof(long)));
+      ++nodes;
+    }
+    p = *e == ',' ? e + 1 : e;
+  }
+  const int MPOL_INTERLEAVE_MODE = 3;
+  if (nodes > 1) syscall(SYS_set_mempolicy, MPOL_INTERLEAVE_MODE, mask, (unsigned long)maxNode);
+#endif
+}
+
+static u64* mapWords(u64 nwords, const char* what) {
+  if (nwords > std::numeric_limits<size_t>::max() / sizeof(u64))
+    die("%s is too large for this platform", what);
+  size_t bytes = std::max<size_t>(nwords * sizeof(u64), 1);
+  void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (p == MAP_FAILED) die("mmap of %s failed", what);
+  madvise(p, bytes, MADV_HUGEPAGE);
+  return (u64*)p;
+}
+
+// Prints a progress line now and then during long phases.
+struct Progress {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool stop = false;
+  std::thread th;
+  Progress(std::string what, const std::atomic<u64>& counter, u64 total, double every) {
+    th = std::thread([this, what, &counter, total, every] {
+      double start = now_s();
+      std::unique_lock<std::mutex> lock(mu);
+      while (!cv.wait_for(lock, std::chrono::duration<double>(every), [this] { return stop; })) {
+        u64 done = std::min(counter.load(std::memory_order_relaxed), total);
+        printf("    [%s] %.1f%% after %.0fs\n", what.c_str(),
+               total ? 100.0 * (double)done / (double)total : 100.0, now_s() - start);
+        fflush(stdout);
+      }
+    });
+  }
+  ~Progress() {
+    { std::lock_guard<std::mutex> lock(mu); stop = true; }
+    cv.notify_all();
+    th.join();
+  }
+};
+
+// ------------------------------------------------------------------------------------------
 // Packed 2-bit WDL table (as in the NOCCA solver).
 // ------------------------------------------------------------------------------------------
 static constexpr size_t HDR_BYTES = 8192;
@@ -646,57 +1262,53 @@ struct Table {
   void alloc(u64 n) {
     N = n;
     nwords = n / TABLE_POSITIONS_PER_WORD + (n % TABLE_POSITIONS_PER_WORD != 0);
-    if (nwords > std::numeric_limits<size_t>::max() / sizeof(u64))
-      die("table is too large for this platform");
-    size_t bytes = nwords * sizeof(u64);
-    words = (u64*)mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (words == MAP_FAILED) die("mmap failed");
-    madvise(words, bytes, MADV_HUGEPAGE);
+    words = mapWords(nwords, "table");
   }
   inline u32 get(u64 i) const {
     u64 w = __atomic_load_n(&words[i / TABLE_POSITIONS_PER_WORD], __ATOMIC_RELAXED);
     int shift = (int)(i % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
     return (u32)((w >> shift) & 3);
   }
-  void save(const std::string& path) {
+  // Atomically replaces `path`. With `frontier` (one bit per position), the positions
+  // whose bit is set are written as state 3; see RetroSolver's checkpoints.
+  void save(const std::string& path, const u64* frontier = nullptr) {
     std::string tmp = path + ".tmp";
     int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) die("open %s failed", tmp.c_str());
     u8 hb[HDR_BYTES]; memset(hb, 0, sizeof hb);
     memcpy(hb, &hdr, sizeof hdr);
-    if (write(fd, hb, HDR_BYTES) != (ssize_t)HDR_BYTES) die("header write failed");
-    size_t bytes = nwords * sizeof(u64), off = 0;
-    while (off < bytes) {
-      ssize_t r = write(fd, (u8*)words + off, std::min((size_t)1 << 30, bytes - off));
-      if (r <= 0) die("table write failed");
-      off += (size_t)r;
-    }
-    if (fsync(fd)) die("fsync failed");
+    pwriteAllAt(fd, hb, HDR_BYTES, 0, "header");
     close(fd);
+    const u64* src = words;
+    bulkWriteWords(tmp, (off_t)HDR_BYTES, nwords,
+                   [src, frontier](u64 first, u64 count, u64* dst) {
+      if (!frontier) { memcpy(dst, src + first, count * sizeof(u64)); return; }
+      for (u64 i = 0; i < count; ++i) {
+        u64 wi = first + i;
+        u64 m = spreadEvenBits((u32)(frontier[wi >> 1] >> (32 * (wi & 1))));
+        dst[i] = src[wi] | m | (m << 1);
+      }
+    });
     if (rename(tmp.c_str(), path.c_str())) die("rename failed");
+    syncCurrentDirectory();
   }
   bool load(const std::string& path, u64 n, bool reduced = false) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return false;
     u8 hb[HDR_BYTES];
-    if (read(fd, hb, HDR_BYTES) != (ssize_t)HDR_BYTES) die("header read failed");
+    preadAllAt(fd, hb, HDR_BYTES, 0, "header");
+    close(fd);
     memcpy(&hdr, hb, sizeof hdr);
     if (!validTableHeader(hdr, n, nwords, reduced))
       die("table mismatch");
-    size_t bytes = nwords * sizeof(u64), off = 0;
-    while (off < bytes) {
-      ssize_t r = read(fd, (u8*)words + off, std::min((size_t)1 << 30, bytes - off));
-      if (r <= 0) die("table read failed");
-      off += (size_t)r;
-    }
-    close(fd);
+    bulkReadWords(path, (off_t)HDR_BYTES, words, nwords);
     return true;
   }
 };
 
 // ------------------------------------------------------------------------------------------
-// Solver
+// Solver: shared setup plus the original forward-iteration algorithm ('solve-forward'),
+// which re-evaluates every undecided position in every pass through the ZDD ranks.
 // ------------------------------------------------------------------------------------------
 struct Solver {
   Zdd Z; Table T;
@@ -959,77 +1571,402 @@ struct Solver {
 };
 
 // ------------------------------------------------------------------------------------------
-// Forward reachability. The finished K plane is one bit per ZDD rank and is appended to a
-// completed version-1 WDL table. During traversal a resumable two-bit work map is used:
-// 0=unseen, 1=committed reachable, 2=pending in the next frontier. A small phase journal
-// makes a crash during frontier construction or pending->committed conversion recoverable.
+// Frontier-driven retrograde solver ('solve').
+//
+// Passes are numbered exactly as in the forward solver, and every pass decides exactly the
+// same positions, so the resulting table and its per-pass history are identical.
+//
+//   pass 1       intrinsic values (pass1Eval), evaluated once per board.
+//   pass 2       every undecided position whose children are all pass-1 wins is a loss.
+//   odd  k >= 3  every undecided predecessor of a loss decided in pass k-1 is a win.
+//   even k >= 4  an undecided predecessor of a win decided in pass k-1 is a loss if all
+//                its children are wins.
+//
+// Besides the two-bit table, one bit per position (the plane F) marks the positions
+// decided in the previous pass. A pass first expands those positions through genPreds and
+// marks their undecided predecessors with the transient state 3; a second sweep turns the
+// marks into wins, or verifies them (all children won) into losses. A position that is
+// still undecided cannot have a lost child from an earlier pass — it would have been
+// marked a win one pass after that child — so "all children decided as wins" is the whole
+// loss test, and marks of the current pass (state 3 or a fresh loss) count as "not won".
+//
+// Checkpoints are ordinary tables in which the positions decided by the last completed
+// pass are stored as state 3; their value follows from the parity of that pass.
 // ------------------------------------------------------------------------------------------
-static void preadAllAt(int fd, void* dst, size_t bytes, off_t offset, const char* what) {
-  size_t done = 0;
-  while (done < bytes) {
-    ssize_t n = pread(fd, (u8*)dst + done, bytes - done, offset + (off_t)done);
-    if (n <= 0) die("%s read failed", what);
-    done += (size_t)n;
+static constexpr u32 CKPT_FRONTIER_MARKED = 1;   // Hdr::reserved of such a checkpoint
+
+struct RetroSolver {
+  Solver& sv;
+  Table& T;
+  SigRank SR;
+  u64 N = 0;
+  int threads;
+  u64* F = nullptr;
+  u64 fwords = 0;
+  double progressEvery = 600.0;
+
+  static constexpr u64 CHUNK = 1ull << 18;   // positions per work unit; a multiple of 64
+  static constexpr int SLOTS = 12;           // candidates verified concurrently per thread
+  static constexpr u32 RING = 64;            // marks delayed behind their prefetch
+
+  explicit RetroSolver(Solver& s) : sv(s), T(s.T), threads(s.threads) {}
+
+  void setup() {
+    N = sv.Z.total;
+    SR.build(sv.reflectionReduced);
+    if (SR.total != N) die("signature-rank table count does not match the ZDD");
+    fwords = reachWordCount(N);
+    F = mapWords(fwords, "frontier plane");
   }
-}
 
-static void pwriteAllAt(int fd, const void* src, size_t bytes, off_t offset,
-                        const char* what) {
-  size_t done = 0;
-  while (done < bytes) {
-    ssize_t n = pwrite(fd, (const u8*)src + done, bytes - done, offset + (off_t)done);
-    if (n <= 0) die("%s write failed", what);
-    done += (size_t)n;
+  static inline u64 load(const u64* p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+  static inline void store(u64* p, u64 v) { __atomic_store_n(p, v, __ATOMIC_RELAXED); }
+  static inline u64 mask3(u64 w) { return w & (w >> 1) & TABLE_LOW_BIT_MASK; }
+  static inline u64 mask0(u64 w) { return ~(w | (w >> 1)) & TABLE_LOW_BIT_MASK; }
+
+  bool claim(std::atomic<u64>& next, u64& lo, u64& hi) const {
+    u64 c = next.fetch_add(1, std::memory_order_relaxed);
+    if (c > N / CHUNK) return false;
+    lo = c * CHUNK;
+    if (lo >= N) return false;
+    hi = std::min(lo + CHUNK, N);
+    return true;
   }
-}
+  u64 chunkCount() const { return N / CHUNK + (N % CHUNK != 0); }
 
-static void syncCurrentDirectory() {
-  int fd = open(".", O_RDONLY | O_DIRECTORY);
-  if (fd >= 0) { fsync(fd); close(fd); }
-}
+  // ---- pass 1 --------------------------------------------------------------------------
+  void setRange(u64 k, u64 e, u64 v) {
+    while (k < e) {
+      u64 wi = k / TABLE_POSITIONS_PER_WORD;
+      u64 stop = std::min(e, (wi + 1) * TABLE_POSITIONS_PER_WORD), span = stop - k;
+      u64 bits = span == TABLE_POSITIONS_PER_WORD ? ~0ull : (1ull << (2 * span)) - 1;
+      T.words[wi] |= ((bits << (2 * (k % TABLE_POSITIONS_PER_WORD))) & TABLE_LOW_BIT_MASK) * v;
+      k = stop;
+    }
+  }
 
-struct PackedPos {
-  u64 lo, hi;
+  void pass1(u64& wins, u64& losses) {
+    std::atomic<u64> next{0}, cw{0}, cl{0};
+    Progress progress("pass 1", next, chunkCount(), progressEvery);
+    runThreads(threads, [&](int) {
+      SigIter it;
+      it.init(SR);
+      u64 lw = 0, ll = 0, lo, hi;
+      while (claim(next, lo, hi)) {
+        for (u64 k = lo; k < hi;) {
+          it.seek(k);
+          u64 e = std::min(hi, it.kend[S]);     // all hands of this board share its value
+          int v = pass1Eval(it.pos);
+          if (v) { setRange(k, e, (u64)v); (v == 1 ? lw : ll) += e - k; }
+          k = e;
+        }
+      }
+      cw += lw; cl += ll;
+    });
+    wins = cw.load(); losses = cl.load();
+  }
+
+  // ---- expansion of the previous pass's decisions --------------------------------------
+  void expand(const char* label) {
+    std::atomic<u64> next{0};
+    Progress progress(label, next, chunkCount(), progressEvery);
+    runThreads(threads, [&](int) {
+      SigIter it;
+      it.init(SR);
+      RankCtx cx;
+      cx.sr = &SR;
+      u64 ring[RING];
+      u32 head = 0, count = 0;
+      auto mark = [&](u64 r) {
+        u64* p = &T.words[r / TABLE_POSITIONS_PER_WORD];
+        int sh = (int)(r % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
+        // Only 0 -> 3 transitions happen in this phase, so a plain OR is exact.
+        if (((load(p) >> sh) & 3) == 0) __atomic_fetch_or(p, 3ull << sh, __ATOMIC_RELAXED);
+      };
+      auto emit = [&](u64 r) {
+        __builtin_prefetch(&T.words[r / TABLE_POSITIONS_PER_WORD], 1, 3);
+        if (count == RING) {
+          mark(ring[head]);
+          ring[head] = r;
+          head = (head + 1) % RING;
+        } else {
+          ring[(head + count++) % RING] = r;
+        }
+      };
+      u64 lo, hi;
+      while (claim(next, lo, hi)) {
+        for (u64 fi = lo / 64, fe = (hi + 63) / 64; fi < fe; ++fi) {
+          u64 w = F[fi];
+          if (!w) continue;
+          F[fi] = 0;
+          do {
+            int b = __builtin_ctzll(w);
+            w &= w - 1;
+            it.seek(fi * 64 + (u64)b);
+            genPreds(it.pos, cx, emit);
+          } while (w);
+        }
+      }
+      for (u32 i = 0; i < count; ++i) mark(ring[(head + i) % RING]);
+    });
+  }
+
+  // ---- win pass: every mark becomes a win ----------------------------------------------
+  u64 convertWins() {
+    std::atomic<u64> next{0}, total{0};
+    runThreads(threads, [&](int) {
+      u64 lo, hi, local = 0;
+      while (claim(next, lo, hi)) {
+        for (u64 fi = lo / 64, fe = (hi + 63) / 64; fi < fe; ++fi) {
+          u64 bits = 0;
+          for (u64 h = 0; h < 2 && 2 * fi + h < T.nwords; ++h) {
+            u64 w = T.words[2 * fi + h], m = mask3(w);
+            if (!m) continue;
+            T.words[2 * fi + h] = w ^ (m << 1);            // 3 -> 1
+            bits |= (u64)compressEvenBits(m) << (32 * h);
+          }
+          if (bits) { F[fi] = bits; local += (u64)__builtin_popcountll(bits); }
+        }
+      }
+      total += local;
+    });
+    return total.load();
+  }
+
+  // ---- loss pass: verify candidates ----------------------------------------------------
+  // Candidates are the positions in state `cand`: 3 (marked by expand) or, for pass 2, 0
+  // (every undecided position). A candidate is a loss if it has a move and every child is
+  // a win. Each thread works on several candidates in turn; a candidate has one child
+  // lookup in flight, prefetched a full turn before it is read, and the next child is
+  // ranked only once the previous one turned out to be a win — most candidates are
+  // refuted by their first or second child.
+  struct Slot {
+    u64 rank, kid;           // the candidate and its child being looked up
+    int next;                // index of the next move to rank
+    bool active;
+    RankCtx cx;
+    MoveList ml;
+  };
+
+  u64 verify(u32 cand, const char* label) {
+    std::atomic<u64> next{0}, found{0};
+    Progress progress(label, next, chunkCount(), progressEvery);
+    runThreads(threads, [&](int) {
+      SigIter it;
+      it.init(SR);
+      std::vector<Slot> slots(SLOTS);
+      for (Slot& s : slots) { s.active = false; s.cx.sr = &SR; }
+      u64 lo = 0, hi = 0, wi = 0, wend = 0, cur = 0, mask = 0, local = 0;
+      bool more = true;
+      int active = 0;
+      auto pull = [&](u64& rank) {
+        for (;;) {
+          while (mask) {
+            int b = __builtin_ctzll(mask);
+            mask &= mask - 1;
+            rank = cur * TABLE_POSITIONS_PER_WORD + (u64)(b >> 1);
+            if (rank < N) return true;           // skip the padding of the last word
+          }
+          if (wi == wend) {
+            if (!claim(next, lo, hi)) return false;
+            wi = lo / TABLE_POSITIONS_PER_WORD;
+            wend = (hi + TABLE_POSITIONS_PER_WORD - 1) / TABLE_POSITIONS_PER_WORD;
+          }
+          u64 w = load(&T.words[wi]);
+          mask = cand == 3 ? mask3(w) : mask0(w);
+          cur = wi++;
+        }
+      };
+      // Only the thread that claimed a chunk writes its words during this phase.
+      auto setField = [&](u64 rank, u64 val) {
+        u64* p = &T.words[rank / TABLE_POSITIONS_PER_WORD];
+        int sh = (int)(rank % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
+        store(p, (load(p) & ~(3ull << sh)) | (val << sh));
+      };
+      auto resolve = [&](u64 rank, bool loss) {
+        if (loss) { setField(rank, 2); F[rank / 64] |= 1ull << (rank % 64); ++local; }
+        else if (cand == 3) setField(rank, 0);
+      };
+      auto launch = [&](Slot& s) {
+        s.kid = rankMove(s.cx, s.ml, s.next++);
+        __builtin_prefetch(&T.words[s.kid / TABLE_POSITIONS_PER_WORD], 0, 3);
+      };
+      for (int c = 0; more || active; c = c + 1 == SLOTS ? 0 : c + 1) {
+        Slot& s = slots[c];
+        if (s.active) {
+          // Marks and fresh losses of this pass are not wins, so "!= 1" refutes.
+          if (T.get(s.kid) != 1) resolve(s.rank, false);
+          else if (s.next < s.ml.n) { launch(s); continue; }
+          else resolve(s.rank, true);
+          s.active = false;
+          --active;
+        }
+        while (more) {
+          u64 rank;
+          if (!pull(rank)) { more = false; break; }
+          it.seek(rank);
+          listMoves(it.pos, true, s.ml);
+          if (!s.ml.n) {                 // every move loses the lion at once, or stalemate
+            resolve(rank, s.ml.any);
+            continue;
+          }
+          s.rank = rank; s.next = 0; s.active = true;
+          ++active;
+          s.cx.build(s.ml.f);
+          launch(s);
+          break;
+        }
+      }
+      found += local;
+    });
+    return found.load();
+  }
+
+  // ---- checkpoints ---------------------------------------------------------------------
+  // Rebuild F from a frontier-marked checkpoint and give the marked positions their value.
+  u64 restoreFrontier(u32 pass) {
+    std::atomic<u64> next{0}, total{0};
+    runThreads(threads, [&](int) {
+      u64 lo, hi, local = 0;
+      while (claim(next, lo, hi)) {
+        for (u64 fi = lo / 64, fe = (hi + 63) / 64; fi < fe; ++fi) {
+          u64 bits = 0;
+          for (u64 h = 0; h < 2 && 2 * fi + h < T.nwords; ++h) {
+            u64 w = T.words[2 * fi + h], m = mask3(w);
+            if (!m) continue;
+            T.words[2 * fi + h] = w ^ (pass % 2 ? m << 1 : m);   // 3 -> 1 or 3 -> 2
+            bits |= (u64)compressEvenBits(m) << (32 * h);
+          }
+          if (bits) { F[fi] = bits; local += (u64)__builtin_popcountll(bits); }
+        }
+      }
+      total += local;
+    });
+    return total.load();
+  }
+
+  void checkpoint(int pass) {
+    double t0 = now_s();
+    T.hdr.reserved = CKPT_FRONTIER_MARKED;
+    T.save(sv.tablePath, pass >= 2 ? F : nullptr);
+    T.hdr.reserved = 0;
+    printf("[solve] checkpoint after pass %d written in %.1fs\n", pass, now_s() - t0);
+    fflush(stdout);
+  }
+
+  void solve(double ckptMinutes) {
+    bool resumed = T.load(sv.tablePath, N, sv.reflectionReduced);
+    int startPass = 1;
+    if (resumed) {
+      if (T.hdr.version == TABLE_FORMAT_V2 && !T.hdr.done)
+        die("cannot resume an incomplete solve after a K plane was attached");
+      if (T.hdr.done) { printf("[solve] table already complete.\n"); return; }
+      if (T.hdr.passesDone >= 2 && T.hdr.reserved != CKPT_FRONTIER_MARKED)
+        die("this checkpoint was written by solve-forward; resume it with solve-forward");
+      startPass = (int)T.hdr.passesDone + 1;
+      printf("[solve] resuming after pass %u\n", T.hdr.passesDone);
+      if (T.hdr.passesDone >= 2) {
+        u32 p = T.hdr.passesDone;
+        u64 n = restoreFrontier(p);
+        if (p < PASS_HIST_CAPACITY && n != T.hdr.histW[p] + T.hdr.histL[p])
+          die("checkpoint frontier does not match its recorded pass history");
+        printf("[solve] restored %s positions decided in pass %u\n", commas(n).c_str(), p);
+      }
+      T.hdr.reserved = 0;
+      fflush(stdout);
+    }
+    double lastCkpt = now_s();
+    bool reported = false;
+    for (int pass = startPass;; ++pass) {
+      double t0 = now_s(), tExpand = 0;
+      u64 nw = 0, nl = 0;
+      char label[32];
+      if (pass == 1) {
+        pass1(nw, nl);
+      } else if (pass == 2) {
+        nl = verify(0, "pass 2");
+      } else {
+        snprintf(label, sizeof label, "pass %d expand", pass);
+        expand(label);
+        tExpand = now_s() - t0;
+        if (pass % 2) nw = convertWins();
+        else {
+          snprintf(label, sizeof label, "pass %d verify", pass);
+          nl = verify(3, label);
+        }
+      }
+      if (pass > 1 && nw && nl)
+        die("pass %d found both wins and losses — parity broken", pass);
+      if ((size_t)pass < PASS_HIST_CAPACITY) {
+        T.hdr.histW[pass] = nw;
+        T.hdr.histL[pass] = nl;
+      }
+      printf("[pass %3d] wins +%-13s losses +%-13s  %6.1fs", pass, commas(nw).c_str(),
+             commas(nl).c_str(), now_s() - t0);
+      if (pass > 2) printf("  (expand %.1fs)", tExpand);
+      printf("\n");
+      u32 iv = T.get(sv.initIdx);
+      if ((iv == 1 || iv == 2) && !reported) {
+        reported = true;
+        printf("[solve] *** initial position decided by pass %d: %s for the first player (Sente) ***\n",
+               pass, iv == 1 ? "WIN" : "LOSS");
+      }
+      fflush(stdout);
+      bool finished = pass > 1 && nw + nl == 0;
+      T.hdr.passesDone = (u32)pass;
+      if (finished) {
+        T.hdr.done = 1;
+        T.save(sv.tablePath);
+        break;
+      }
+      if (now_s() - lastCkpt >= ckptMinutes * 60.0) {
+        checkpoint(pass);
+        lastCkpt = now_s();
+      }
+    }
+    u64 wins, losses, draws;
+    sv.tally(wins, losses, draws);
+    printf("[done] pseudo-reachable totals: wins=%s losses=%s draws=%s total=%s\n",
+           commas(wins).c_str(), commas(losses).c_str(), commas(draws).c_str(),
+           commas(wins + losses + draws).c_str());
+    u32 iv = T.get(sv.initIdx);
+    printf("[done] initial position: %s\n",
+           iv == 1 ? "WIN for Sente (first player)" :
+           iv == 2 ? "LOSS for Sente — GOTE (second player) WINS" : "DRAW");
+    fflush(stdout);
+  }
 };
-static_assert(sizeof(PackedPos) == 16);
 
-static PackedPos packPosition(const u8* arr) {
-  u128 p = 0;
-  for (int i = 0; i < ARR; ++i) p |= (u128)arr[i] << (4 * i);
-  return {(u64)p, (u64)(p >> 64)};
-}
-
-static void unpackPosition(const PackedPos& p, u8* arr) {
-  u128 v = (u128)p.lo | (u128)p.hi << 64;
-  for (int i = 0; i < ARR; ++i) arr[i] = (u8)((v >> (4 * i)) & 0xf);
-}
-
+// ------------------------------------------------------------------------------------------
+// Forward reachability. The finished K plane is one bit per rank and is appended to a
+// completed WDL table. The breadth-first traversal keeps a two-bit state per rank in
+// memory: 0 = unseen, 1 = reached and expanded, 2 = frontier of the current level,
+// 3 = found during the current level. Level boundaries are checkpointed to
+// reach_work_*.bin, so an interrupted traversal resumes from its last checkpoint.
+// ------------------------------------------------------------------------------------------
 static constexpr size_t REACH_WORK_HDR_BYTES = 4096;
-static constexpr u32 REACH_WORK_VERSION = 1;
-enum ReachPhase : u32 { REACH_READY = 0, REACH_EXPANDING = 1, REACH_COMMITTING = 2 };
 
 struct ReachWorkHdr {
-  char magic[8];                    // "DOBURCHW"
-  u32 version, W, L, phase;
-  u32 frontierSlot, nextSlot, level, reserved;
-  u64 N, stateWords;
-  u64 frontierCount, nextCount, reachableCount, commitTotal;
+  char magic[8];                    // "DOBURCH2"
+  u32 W, L, flags, level;
+  u64 N, stateWords, reachableCount, frontierCount;
 };
 static_assert(sizeof(ReachWorkHdr) <= REACH_WORK_HDR_BYTES);
 
 class Reachability {
   Zdd Z;
+  SigRank SR;
   bool reflectionReduced;
   int threads;
-  std::string tablePath, workPath, frontierPath[2], frontierTmpPath;
-  int workFd = -1;
-  u8* workMap = nullptr;
-  size_t workMapBytes = 0, stateBytes = 0;
-  ReachWorkHdr* wh = nullptr;
+  double ckptMinutes;
+  std::string tablePath, workPath;
   u64* states = nullptr;
+  u64 N = 0, stateWords = 0;
+  u32 level = 0;
+  u64 reachable = 0, frontier = 0;
 
-  static constexpr u64 FRONTIER_CHUNK = 1ull << 12;
-  static constexpr size_t WRITER_RECORDS = 1ull << 13;
+  static constexpr u64 CHUNK = 1ull << 18;
+  static constexpr u32 RING = 64;
 
   u64 expectedReachableCount() const {
     // This solver's ZDD ranks both left/right orientations separately. The published
@@ -1041,321 +1978,152 @@ class Reachability {
     return 0;
   }
 
-  void makePaths() {
-    char b[128];
-    const char* suffix = reflectionReduced ? "_lr" : "";
-    snprintf(b, sizeof b, "reach_work_%dx%d%s.bin", R, C, suffix); workPath = b;
-    snprintf(b, sizeof b, "reach_frontier_%dx%d%s_0.bin", R, C, suffix); frontierPath[0] = b;
-    snprintf(b, sizeof b, "reach_frontier_%dx%d%s_1.bin", R, C, suffix); frontierPath[1] = b;
-    snprintf(b, sizeof b, "reach_frontier_%dx%d%s.tmp", R, C, suffix); frontierTmpPath = b;
+  u32 workFlags() const { return reflectionReduced ? TABLE_FLAG_REFLECTION_REDUCED : 0; }
+
+  void expandLevel() {
+    std::atomic<u64> next{0};
+    char label[32];
+    snprintf(label, sizeof label, "reach level %u", level + 1);
+    Progress progress(label, next, N / CHUNK + 1, 600.0);
+    runThreads(threads, [&](int) {
+      SigIter it;
+      it.init(SR);
+      RankCtx cx;
+      cx.sr = &SR;
+      u64 kids[MAX_KIDS], ring[RING];
+      u32 head = 0, count = 0;
+      auto mark = [&](u64 r) {
+        u64* p = &states[r / TABLE_POSITIONS_PER_WORD];
+        int sh = (int)(r % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
+        // Only 0 -> 3 transitions happen during an expansion, so a plain OR is exact.
+        if (((__atomic_load_n(p, __ATOMIC_RELAXED) >> sh) & 3) == 0)
+          __atomic_fetch_or(p, 3ull << sh, __ATOMIC_RELAXED);
+      };
+      auto emit = [&](u64 r) {
+        __builtin_prefetch(&states[r / TABLE_POSITIONS_PER_WORD], 1, 3);
+        if (count == RING) {
+          mark(ring[head]);
+          ring[head] = r;
+          head = (head + 1) % RING;
+        } else {
+          ring[(head + count++) % RING] = r;
+        }
+      };
+      for (;;) {
+        u64 lo = next.fetch_add(1, std::memory_order_relaxed) * CHUNK;
+        if (lo >= N) break;
+        u64 hi = std::min(lo + CHUNK, N);
+        for (u64 wi = lo / TABLE_POSITIONS_PER_WORD,
+                 we = (hi + TABLE_POSITIONS_PER_WORD - 1) / TABLE_POSITIONS_PER_WORD;
+             wi < we; ++wi) {
+          u64 w = __atomic_load_n(&states[wi], __ATOMIC_RELAXED);
+          u64 m = (w >> 1) & ~w & TABLE_LOW_BIT_MASK;          // fields equal to 2
+          while (m) {
+            int b = __builtin_ctzll(m);
+            m &= m - 1;
+            it.seek(wi * TABLE_POSITIONS_PER_WORD + (u64)(b >> 1));
+            if (gameAlreadyOver(it.pos)) continue;
+            bool complete, any;
+            int n = genChildren(it.pos, cx, kids, MAX_KIDS, false, complete, any);
+            if (!complete) die("more than %d children", MAX_KIDS);
+            for (int j = 0; j < n; ++j) emit(kids[j]);
+          }
+        }
+      }
+      for (u32 i = 0; i < count; ++i) mark(ring[(head + i) % RING]);
+    });
   }
 
-  static off_t checkedFileBytes(u64 records, size_t recordBytes, const char* what) {
-    u128 n = (u128)records * recordBytes;
-    if (n > (u128)std::numeric_limits<off_t>::max()) die("%s is too large", what);
-    return (off_t)n;
-  }
-
-  void persistHeader() {
-    if (msync(workMap, REACH_WORK_HDR_BYTES, MS_SYNC)) die("reach header msync failed");
-  }
-
-  void persistStates() {
-    if (msync((u8*)states, stateBytes, MS_SYNC)) die("reach state msync failed");
-  }
-
-  static void writeInitialFrontier(const std::string& path, const PackedPos& p) {
-    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) die("cannot create %s", path.c_str());
-    pwriteAllAt(fd, &p, sizeof p, 0, "initial frontier");
-    if (fsync(fd)) die("initial frontier fsync failed");
-    close(fd);
-  }
-
-  void validateFrontier(int slot, u64 count) const {
-    struct stat st{};
-    if (stat(frontierPath[slot].c_str(), &st))
-      die("missing reach frontier %s", frontierPath[slot].c_str());
-    off_t expected = checkedFileBytes(count, sizeof(PackedPos), "reach frontier");
-    if (st.st_size != expected)
-      die("reach frontier size mismatch: %s", frontierPath[slot].c_str());
-  }
-
-  // Convert all pending states (10b) either to committed (01b) or back to unseen (00b).
-  u64 sweepPending(bool commit) {
-    std::atomic<u64> count{0}, bad{0};
-    std::vector<std::thread> pool;
-    u64 per = (wh->stateWords + threads - 1) / threads;
-    for (int t = 0; t < threads; ++t) pool.emplace_back([&, t] {
-      u64 begin = (u64)t * per, end = std::min(wh->stateWords, begin + per), local = 0;
+  // Frontier (2) becomes reached (1); newly found (3) becomes the next frontier (2).
+  u64 commitLevel() {
+    std::atomic<u64> found{0};
+    u64 per = stateWords / (u64)threads + 1;
+    runThreads(threads, [&](int t) {
+      u64 begin = std::min(stateWords, (u64)t * per), end = std::min(stateWords, begin + per);
+      u64 local = 0;
       for (u64 i = begin; i < end; ++i) {
         u64 w = states[i];
-        u64 low = w & TABLE_LOW_BIT_MASK;
-        u64 high = (w >> 1) & TABLE_LOW_BIT_MASK;
-        if (high & low) bad.fetch_add(__builtin_popcountll(high & low),
-                                      std::memory_order_relaxed);
-        u64 pending = high & ~low;
-        if (!pending) continue;
-        local += __builtin_popcountll(pending);
-        states[i] = commit ? ((w & ~(pending << 1)) | pending)
-                           : (w & ~(pending << 1));
+        u64 high = (w >> 1) & TABLE_LOW_BIT_MASK, low = w & TABLE_LOW_BIT_MASK;
+        u64 f2 = high & ~low, f3 = high & low;
+        if (!(f2 | f3)) continue;
+        states[i] = w ^ (f2 * 3) ^ f3;
+        local += (u64)__builtin_popcountll(f3);
       }
-      count.fetch_add(local, std::memory_order_relaxed);
+      found += local;
     });
-    for (auto& t : pool) t.join();
-    if (bad.load()) die("reach work map contains invalid state 3");
-    return count.load();
+    return found.load();
   }
 
-  bool markPending(u64 rank) {
-    u64* word = &states[rank / TABLE_POSITIONS_PER_WORD];
-    int shift = (int)(rank % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
-    u64 fieldMask = 3ull << shift, pending = 2ull << shift;
-    u64 old = __atomic_load_n(word, __ATOMIC_RELAXED);
-    for (;;) {
-      if (old & fieldMask) return false;
-      u64 desired = old | pending;
-      if (__atomic_compare_exchange_n(word, &old, desired, false,
-                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-        return true;
-    }
-  }
-
-  struct FrontierWriter {
-    int fd;
-    std::atomic<u64>& records;
-    std::vector<PackedPos> buf;
-
-    FrontierWriter(int f, std::atomic<u64>& n) : fd(f), records(n) {
-      buf.reserve(WRITER_RECORDS);
-    }
-    void add(const u8* arr) {
-      buf.push_back(packPosition(arr));
-      if (buf.size() == WRITER_RECORDS) flush();
-    }
-    void flush() {
-      if (buf.empty()) return;
-      u64 base = records.fetch_add(buf.size(), std::memory_order_relaxed);
-      off_t off = checkedFileBytes(base, sizeof(PackedPos), "reach frontier offset");
-      pwriteAllAt(fd, buf.data(), buf.size() * sizeof(PackedPos), off, "reach frontier");
-      buf.clear();
-    }
-  };
-
-  void expandPosition(const u8* arr, FrontierWriter& out) {
-    if (gameAlreadyOver(arr)) return;
-    int hb[HAND_TYPES], hw[HAND_TYPES];
-    handCounts(arr, hb);
-    whiteHand(arr, hb, hw);
-    u8 fpos[MAXARR], child[MAXARR], mirrorBase[MAXARR], mirrorChild[MAXARR];
-    u32 nodeAt[MAXARR + 1], mirrorNodeAt[MAXARR + 1];
-    u64 kAt[MAXARR + 1], mirrorKAt[MAXARR + 1];
-    buildFlip(arr, hw, fpos);
-    Z.buildPrefix(fpos, nodeAt, kAt);
-    memcpy(child, fpos, ARR);
-    if (reflectionReduced) {
-      mirrorPosition(fpos, mirrorBase);
-      Z.buildPrefix(mirrorBase, mirrorNodeAt, mirrorKAt);
-      memcpy(mirrorChild, mirrorBase, ARR);
-    }
-
-    for (int q = 0; q < S; ++q) {
-      int s = arr[q];
-      if (s < 1 || s > 5) continue;
-      int f1 = flipSq_[q];
-      for (u8 t : MOV[s][q]) {
-        int tt = arr[t];
-        if (tt >= 1 && tt <= 6) continue;  // own piece or terminal lion capture
-        int ns = (s == 4 && rowOf_[t] == 0) ? 5 : s;
-        int f2 = flipSq_[t];
-        child[f1] = 0; child[f2] = (u8)(ns + 5);
-        int first = std::min(f1, f2);
-        const u8* indexed = child;
-        u64 rank;
-        int mf1 = 0, mf2 = 0;
-        if (!reflectionReduced) {
-          rank = Z.rankFrom(nodeAt[first], kAt[first], child);
-        } else {
-          mf1 = mirSq_[f1]; mf2 = mirSq_[f2];
-          mirrorChild[mf1] = 0; mirrorChild[mf2] = (u8)(ns + 5);
-          if (compareReflection(child) <= 0)
-            rank = Z.rankFrom(nodeAt[first], kAt[first], child);
-          else {
-            indexed = mirrorChild;
-            int mirrorFirst = std::min(mf1, mf2);
-            rank = Z.rankFrom(mirrorNodeAt[mirrorFirst], mirrorKAt[mirrorFirst],
-                              mirrorChild);
-          }
-        }
-        if (rank == UINT64_MAX) die("reach child rank failed");
-        if (markPending(rank)) out.add(indexed);
-        child[f1] = fpos[f1]; child[f2] = fpos[f2];
-        if (reflectionReduced) {
-          mirrorChild[mf1] = mirrorBase[mf1]; mirrorChild[mf2] = mirrorBase[mf2];
-        }
-      }
-    }
-    for (int type = 0; type < HAND_TYPES; ++type) {
-      if (!hb[type]) continue;
-      u8 dropped = (u8)(2 + type + 5);
-      for (int q = 0; q < S; ++q) {
-        if (arr[q]) continue;
-        int f1 = flipSq_[q];
-        child[f1] = dropped;
-        const u8* indexed = child;
-        u64 rank;
-        int mf1 = 0;
-        if (!reflectionReduced) {
-          rank = Z.rankFrom(nodeAt[f1], kAt[f1], child);
-        } else {
-          mf1 = mirSq_[f1]; mirrorChild[mf1] = dropped;
-          if (compareReflection(child) <= 0)
-            rank = Z.rankFrom(nodeAt[f1], kAt[f1], child);
-          else {
-            indexed = mirrorChild;
-            rank = Z.rankFrom(mirrorNodeAt[mf1], mirrorKAt[mf1], mirrorChild);
-          }
-        }
-        if (rank == UINT64_MAX) die("reach drop rank failed");
-        if (markPending(rank)) out.add(indexed);
-        child[f1] = fpos[f1];
-        if (reflectionReduced) mirrorChild[mf1] = mirrorBase[mf1];
-      }
-    }
-  }
-
-  void recoverIfNeeded() {
-    if (wh->phase == REACH_EXPANDING) {
-      printf("[reach] recovering interrupted expansion at level %u\n", wh->level);
-      u64 cleared = sweepPending(false);
-      persistStates();
-      unlink(frontierTmpPath.c_str());
-      unlink(frontierPath[wh->nextSlot].c_str());
-      wh->phase = REACH_READY; wh->nextCount = 0; wh->commitTotal = 0;
-      persistHeader();
-      printf("[reach] rolled back %s pending positions\n", commas(cleared).c_str());
-    } else if (wh->phase == REACH_COMMITTING) {
-      printf("[reach] finishing interrupted commit at level %u\n", wh->level + 1);
-      finishCommit(true);
-    } else if (wh->phase != REACH_READY) {
-      die("unknown reach work phase %u", wh->phase);
-    }
-  }
-
-  void finishCommit(bool recovering = false) {
-    validateFrontier(wh->nextSlot, wh->nextCount);
-    u64 converted = sweepPending(true);
-    if ((!recovering && converted != wh->nextCount) || converted > wh->nextCount)
-      die("reach commit mismatch: frontier=%" PRIu64 " pending=%" PRIu64,
-          wh->nextCount, converted);
-    persistStates();
-    wh->reachableCount = wh->commitTotal;
-    wh->frontierSlot = wh->nextSlot;
-    wh->frontierCount = wh->nextCount;
-    wh->nextCount = 0;
-    wh->commitTotal = 0;
-    ++wh->level;
-    wh->phase = REACH_READY;
-    persistHeader();
-  }
-
-  void expandOneLevel() {
-    validateFrontier(wh->frontierSlot, wh->frontierCount);
-    off_t currentBytes = checkedFileBytes(wh->frontierCount, sizeof(PackedPos),
-                                          "reach frontier");
-    int currentFd = open(frontierPath[wh->frontierSlot].c_str(), O_RDONLY);
-    if (currentFd < 0) die("cannot open current reach frontier");
-    const PackedPos* current = nullptr;
-    if (currentBytes) {
-      void* p = mmap(nullptr, (size_t)currentBytes, PROT_READ, MAP_SHARED, currentFd, 0);
-      if (p == MAP_FAILED) die("reach frontier mmap failed");
-      current = (const PackedPos*)p;
-      madvise(p, (size_t)currentBytes, MADV_SEQUENTIAL);
-    }
-
-    int nextFd = open(frontierTmpPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (nextFd < 0) die("cannot create next reach frontier");
-    wh->nextSlot = 1u - wh->frontierSlot;
-    wh->nextCount = 0;
-    wh->phase = REACH_EXPANDING;
-    persistHeader();
-
-    double started = now_s();
-    std::atomic<u64> cursor{0}, nextRecords{0};
-    std::vector<std::thread> pool;
-    for (int t = 0; t < threads; ++t) pool.emplace_back([&, t] {
-      (void)t;
-      FrontierWriter writer(nextFd, nextRecords);
-      u8 arr[MAXARR];
-      for (;;) {
-        u64 begin = cursor.fetch_add(FRONTIER_CHUNK, std::memory_order_relaxed);
-        if (begin >= wh->frontierCount) break;
-        u64 end = std::min(wh->frontierCount, begin + FRONTIER_CHUNK);
-        for (u64 i = begin; i < end; ++i) {
-          unpackPosition(current[i], arr);
-          expandPosition(arr, writer);
-        }
-      }
-      writer.flush();
-    });
-    for (auto& t : pool) t.join();
-    u64 nextCount = nextRecords.load();
-    off_t nextBytes = checkedFileBytes(nextCount, sizeof(PackedPos), "next reach frontier");
-    if (ftruncate(nextFd, nextBytes)) die("next reach frontier truncate failed");
-    if (fsync(nextFd)) die("next reach frontier fsync failed");
-    close(nextFd);
-    if (currentBytes) munmap((void*)current, (size_t)currentBytes);
-    close(currentFd);
-    if (rename(frontierTmpPath.c_str(), frontierPath[wh->nextSlot].c_str()))
-      die("next reach frontier rename failed");
+  void saveWork() {
+    double t0 = now_s();
+    std::string tmp = workPath + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) die("cannot create %s", tmp.c_str());
+    u8 hb[REACH_WORK_HDR_BYTES];
+    memset(hb, 0, sizeof hb);
+    ReachWorkHdr h{};
+    memcpy(h.magic, "DOBURCH2", 8);
+    h.W = C; h.L = R; h.flags = workFlags(); h.level = level;
+    h.N = N; h.stateWords = stateWords; h.reachableCount = reachable;
+    h.frontierCount = frontier;
+    memcpy(hb, &h, sizeof h);
+    pwriteAllAt(fd, hb, sizeof hb, 0, "reach work header");
+    close(fd);
+    const u64* src = states;
+    bulkWriteWords(tmp, (off_t)REACH_WORK_HDR_BYTES, stateWords,
+                   [src](u64 first, u64 count, u64* dst) {
+                     memcpy(dst, src + first, count * sizeof(u64));
+                   });
+    if (rename(tmp.c_str(), workPath.c_str())) die("reach work rename failed");
     syncCurrentDirectory();
-
-    wh->nextCount = nextCount;
-    wh->commitTotal = wh->reachableCount + nextCount;
-    wh->phase = REACH_COMMITTING;
-    persistHeader();
-    u64 previousTotal = wh->reachableCount;
-    finishCommit();
-    printf("[reach level %3u] +%-13s = %-15s %7.1fs\n", wh->level,
-           commas(nextCount).c_str(), commas(previousTotal + nextCount).c_str(),
-           now_s() - started);
+    printf("[reach] checkpoint after level %u written in %.1fs\n", level, now_s() - t0);
     fflush(stdout);
   }
 
-  static u32 compressEvenBits(u64 x) {
-    x &= TABLE_LOW_BIT_MASK;
-    x = (x | (x >> 1)) & 0x3333333333333333ull;
-    x = (x | (x >> 2)) & 0x0f0f0f0f0f0f0f0full;
-    x = (x | (x >> 4)) & 0x00ff00ff00ff00ffull;
-    x = (x | (x >> 8)) & 0x0000ffff0000ffffull;
-    x = (x | (x >> 16)) & 0x00000000ffffffffull;
-    return (u32)x;
+  bool loadWork() {
+    int fd = open(workPath.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    u8 hb[REACH_WORK_HDR_BYTES];
+    preadAllAt(fd, hb, sizeof hb, 0, "reach work header");
+    close(fd);
+    ReachWorkHdr h{};
+    memcpy(&h, hb, sizeof h);
+    if (!memcmp(h.magic, "DOBURCHW", 8))
+      die("%s was written by the older disk-based traversal; delete it and the "
+          "reach_frontier_* files, then run 'reach' again", workPath.c_str());
+    if (memcmp(h.magic, "DOBURCH2", 8) || h.W != (u32)C || h.L != (u32)R
+        || h.flags != workFlags() || h.N != N || h.stateWords != stateWords)
+      die("reach work file does not match this board/code");
+    bulkReadWords(workPath, (off_t)REACH_WORK_HDR_BYTES, states, stateWords);
+    level = h.level; reachable = h.reachableCount; frontier = h.frontierCount;
+    printf("[reach] resuming after level %u: %s reached, frontier %s\n", level,
+           commas(reachable).c_str(), commas(frontier).c_str());
+    return true;
   }
 
   void finalizeTable() {
     u64 expected = expectedReachableCount();
-    if (expected && wh->reachableCount != expected)
+    if (expected && reachable != expected)
       die("reachable count mismatch: got %s expected %s; table was not modified",
-          commas(wh->reachableCount).c_str(), commas(expected).c_str());
+          commas(reachable).c_str(), commas(expected).c_str());
 
     int fd = open(tablePath.c_str(), O_RDWR);
     if (fd < 0) die("cannot open completed WDL table %s", tablePath.c_str());
     u8 headerBytes[HDR_BYTES];
     preadAllAt(fd, headerBytes, HDR_BYTES, 0, "WDL header");
     Hdr h{}; memcpy(&h, headerBytes, sizeof h);
-    if (!validTableHeader(h, Z.total, wh->stateWords, reflectionReduced) || !h.done)
+    if (!validTableHeader(h, N, stateWords, reflectionReduced) || !h.done)
       die("reachability requires a completed matching WDL table");
     if (tableHasReachability(h)) {
-      if (h.reachableCount != wh->reachableCount) die("existing K-plane count mismatch");
+      if (h.reachableCount != reachable) die("existing K-plane count mismatch");
       close(fd);
       printf("[reach] WDL table already contains a validated K plane\n");
       return;
     }
 
-    u64 kwords = reachWordCount(Z.total);
-    off_t reachOffset = (off_t)HDR_BYTES
-                      + checkedFileBytes(wh->stateWords, sizeof(u64), "WDL plane");
-    off_t finalBytes = reachOffset + checkedFileBytes(kwords, sizeof(u64), "K plane");
+    u64 kwords = reachWordCount(N);
+    off_t reachOffset = (off_t)HDR_BYTES + (off_t)(stateWords * sizeof(u64));
+    off_t finalBytes = reachOffset + (off_t)(kwords * sizeof(u64));
     struct stat st{};
     if (fstat(fd, &st)) die("WDL table stat failed");
     if (st.st_size < reachOffset) die("WDL table is truncated");
@@ -1363,51 +2131,38 @@ class Reachability {
       printf("[reach] replacing an incomplete trailing K plane\n");
     if (ftruncate(fd, finalBytes)) die("WDL+K table truncate failed");
 
-    std::atomic<u64> outputCursor{0}, setBits{0};
-    std::vector<std::thread> pool;
-    static constexpr u64 OUTPUT_WORDS = 1ull << 17;
-    for (int t = 0; t < threads; ++t) pool.emplace_back([&, t] {
-      (void)t;
-      std::vector<u64> out;
-      u64 localCount = 0;
-      for (;;) {
-        u64 begin = outputCursor.fetch_add(OUTPUT_WORDS, std::memory_order_relaxed);
-        if (begin >= kwords) break;
-        u64 end = std::min(kwords, begin + OUTPUT_WORDS);
-        out.resize((size_t)(end - begin));
-        for (u64 j = begin; j < end; ++j) {
-          u64 a = 2 * j < wh->stateWords ? states[2 * j] : 0;
-          u64 b = 2 * j + 1 < wh->stateWords ? states[2 * j + 1] : 0;
-          // At a completed checkpoint all reachable fields are 01b; accepting either bit
-          // here also makes finalization idempotent after a recovered commit.
-          u32 lo = compressEvenBits(a | (a >> 1));
-          u32 hi = compressEvenBits(b | (b >> 1));
-          u64 bits = (u64)lo | (u64)hi << 32;
-          out[(size_t)(j - begin)] = bits;
-          localCount += __builtin_popcountll(bits);
-        }
-        pwriteAllAt(fd, out.data(), out.size() * sizeof(u64),
-                    reachOffset + (off_t)(begin * sizeof(u64)), "K plane");
+    std::atomic<u64> setBits{0};
+    const u64* src = states;
+    const u64 words = stateWords;
+    bulkWriteWords(tablePath, reachOffset, kwords,
+                   [&setBits, src, words](u64 first, u64 count, u64* dst) {
+      u64 local = 0;
+      for (u64 i = 0; i < count; ++i) {
+        u64 j = first + i;
+        u64 a = 2 * j < words ? src[2 * j] : 0;
+        u64 b = 2 * j + 1 < words ? src[2 * j + 1] : 0;
+        // After the traversal every reachable field is 01b.
+        u64 bits = (u64)compressEvenBits(a | (a >> 1))
+                 | (u64)compressEvenBits(b | (b >> 1)) << 32;
+        dst[i] = bits;
+        local += (u64)__builtin_popcountll(bits);
       }
-      setBits.fetch_add(localCount, std::memory_order_relaxed);
+      setBits.fetch_add(local, std::memory_order_relaxed);
     });
-    for (auto& t : pool) t.join();
-    if (setBits.load() != wh->reachableCount)
-      die("K-plane bit count mismatch after writing");
-    if (fsync(fd)) die("K-plane fsync failed");
+    if (setBits.load() != reachable) die("K-plane bit count mismatch after writing");
 
     h.version = reflectionReduced ? TABLE_FORMAT_V3 : TABLE_FORMAT_V2;
     h.P = TABLE_FLAG_REACHABILITY
         | (reflectionReduced ? TABLE_FLAG_REFLECTION_REDUCED : 0);
     h.reachWords = kwords;
-    h.reachableCount = wh->reachableCount;
+    h.reachableCount = reachable;
     h.reachDone = 1;
     memcpy(headerBytes, &h, sizeof h);
     pwriteAllAt(fd, headerBytes, HDR_BYTES, 0, "WDL+K header");
     if (fsync(fd)) die("WDL+K header fsync failed");
     close(fd);
     printf("[reach] appended K plane: %s reachable bits, table format version %u\n",
-           commas(wh->reachableCount).c_str(), h.version);
+           commas(reachable).c_str(), h.version);
   }
 
   bool completedTableAlreadyHasReach() {
@@ -1416,9 +2171,7 @@ class Reachability {
     u8 hb[HDR_BYTES]; preadAllAt(fd, hb, sizeof hb, 0, "WDL header");
     close(fd);
     Hdr h{}; memcpy(&h, hb, sizeof h);
-    if (!validTableHeader(h, Z.total, Z.total / TABLE_POSITIONS_PER_WORD
-                                      + (Z.total % TABLE_POSITIONS_PER_WORD != 0),
-                          reflectionReduced) || !h.done)
+    if (!validTableHeader(h, N, stateWords, reflectionReduced) || !h.done)
       die("reachability requires a completed matching WDL table");
     if (!tableHasReachability(h)) return false;
     printf("[reach] table already has K plane: %s reachable of %s positions\n",
@@ -1426,72 +2179,14 @@ class Reachability {
     return true;
   }
 
-  void openOrCreateWork() {
-    u64 stateWords = Z.total / TABLE_POSITIONS_PER_WORD
-                   + (Z.total % TABLE_POSITIONS_PER_WORD != 0);
-    stateBytes = (size_t)checkedFileBytes(stateWords, sizeof(u64), "reach work map");
-    u128 totalMap = (u128)REACH_WORK_HDR_BYTES + stateBytes;
-    if (totalMap > std::numeric_limits<size_t>::max()) die("reach work map is too large");
-    workMapBytes = (size_t)totalMap;
-    workFd = open(workPath.c_str(), O_RDWR | O_CREAT, 0644);
-    if (workFd < 0) die("cannot open %s", workPath.c_str());
-    struct stat st{}; if (fstat(workFd, &st)) die("reach work stat failed");
-    bool fresh = st.st_size == 0;
-    if (fresh && ftruncate(workFd, (off_t)workMapBytes)) die("reach work truncate failed");
-    if (!fresh && (u64)st.st_size != workMapBytes) die("reach work file size mismatch");
-    void* p = mmap(nullptr, workMapBytes, PROT_READ | PROT_WRITE, MAP_SHARED, workFd, 0);
-    if (p == MAP_FAILED) die("reach work mmap failed");
-    workMap = (u8*)p; wh = (ReachWorkHdr*)p;
-    states = (u64*)(workMap + REACH_WORK_HDR_BYTES);
-    madvise(states, stateBytes, MADV_HUGEPAGE);
-
-    if (fresh) {
-      memset(wh, 0, sizeof *wh);
-      memcpy(wh->magic, "DOBURCHW", 8);
-      wh->version = REACH_WORK_VERSION; wh->W = C; wh->L = R;
-      wh->reserved = reflectionReduced ? TABLE_FLAG_REFLECTION_REDUCED : 0;
-      wh->phase = REACH_READY; wh->frontierSlot = 0;
-      wh->N = Z.total; wh->stateWords = stateWords;
-      u8 initial[MAXARR], scratch[MAXARR]; Solver::initialPosition(initial);
-      const u8* indexed = reflectionRepresentative(initial, scratch, reflectionReduced);
-      u64 rank = Z.rank(indexed);
-      if (rank == UINT64_MAX) die("initial position rank failed");
-      int shift = (int)(rank % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION;
-      states[rank / TABLE_POSITIONS_PER_WORD] |= 1ull << shift;
-      wh->frontierCount = 1; wh->reachableCount = 1;
-      writeInitialFrontier(frontierPath[0], packPosition(indexed));
-      unlink(frontierPath[1].c_str()); unlink(frontierTmpPath.c_str());
-      persistStates(); persistHeader(); syncCurrentDirectory();
-      printf("[reach] initialized resumable work map %s\n", workPath.c_str());
-    } else {
-      if (memcmp(wh->magic, "DOBURCHW", 8) || wh->version != REACH_WORK_VERSION
-          || wh->W != (u32)C || wh->L != (u32)R || wh->N != Z.total
-          || wh->stateWords != stateWords || wh->frontierSlot > 1 || wh->nextSlot > 1
-          || wh->reserved != (reflectionReduced ? TABLE_FLAG_REFLECTION_REDUCED : 0))
-        die("reach work file does not match this board/code");
-      printf("[reach] resuming after level %u: %s reached, frontier %s\n", wh->level,
-             commas(wh->reachableCount).c_str(), commas(wh->frontierCount).c_str());
-      recoverIfNeeded();
-    }
-  }
-
-  void closeWork() {
-    if (workMap) { munmap(workMap, workMapBytes); workMap = nullptr; }
-    if (workFd >= 0) { close(workFd); workFd = -1; }
-  }
-
-  void cleanupWorkFiles() {
-    unlink(workPath.c_str()); unlink(frontierPath[0].c_str());
-    unlink(frontierPath[1].c_str()); unlink(frontierTmpPath.c_str());
-    syncCurrentDirectory();
-  }
-
  public:
-  Reachability(int nthreads, const std::string& path, bool reduced)
-      : Z(reduced), reflectionReduced(reduced), threads(nthreads), tablePath(path) {
-    makePaths();
+  Reachability(int nthreads, const std::string& path, bool reduced, double ckptMin)
+      : Z(reduced), reflectionReduced(reduced), threads(nthreads), ckptMinutes(ckptMin),
+        tablePath(path) {
+    char b[128];
+    snprintf(b, sizeof b, "reach_work_%dx%d%s.bin", R, C, reduced ? "_lr" : "");
+    workPath = b;
   }
-  ~Reachability() { closeWork(); }
 
   void run() {
     double started = now_s();
@@ -1500,17 +2195,45 @@ class Reachability {
     u64 expected = reflectionReduced
                  ? (dp + Zdd::dpMirrorFixedCount()) / 2 : dp;
     if (Z.total != expected) die("ZDD count crosscheck failed");
+    SR.build(reflectionReduced);
+    if (SR.total != Z.total) die("signature-rank table count does not match the ZDD");
+    N = Z.total;
+    stateWords = N / TABLE_POSITIONS_PER_WORD + (N % TABLE_POSITIONS_PER_WORD != 0);
     printf("[reach] %dx%d, %d threads, %s universe %s positions\n", R, C, threads,
            reflectionReduced ? "reflection-orbit" : "full-rank",
-           commas(Z.total).c_str());
-    if (completedTableAlreadyHasReach()) { cleanupWorkFiles(); return; }
-    openOrCreateWork();
-    while (wh->frontierCount) expandOneLevel();
+           commas(N).c_str());
+    if (completedTableAlreadyHasReach()) { unlink(workPath.c_str()); return; }
+    states = mapWords(stateWords, "reach state map");
+    if (!loadWork()) {
+      u8 initial[MAXARR], scratch[MAXARR];
+      Solver::initialPosition(initial);
+      u64 rank = Z.rankCanonical(initial, scratch);
+      if (rank == UINT64_MAX) die("initial position rank failed");
+      states[rank / TABLE_POSITIONS_PER_WORD] |=
+          2ull << ((rank % TABLE_POSITIONS_PER_WORD) * TABLE_BITS_PER_POSITION);
+      reachable = frontier = 1;
+    }
+    fflush(stdout);
+    double lastCkpt = now_s();
+    while (frontier) {
+      double t0 = now_s();
+      expandLevel();
+      frontier = commitLevel();
+      reachable += frontier;
+      ++level;
+      printf("[reach level %3u] +%-13s = %-15s %7.1fs\n", level, commas(frontier).c_str(),
+             commas(reachable).c_str(), now_s() - t0);
+      fflush(stdout);
+      if (frontier && now_s() - lastCkpt >= ckptMinutes * 60.0) {
+        saveWork();
+        lastCkpt = now_s();
+      }
+    }
     printf("[reach] traversal complete: %s reachable positions\n",
-           commas(wh->reachableCount).c_str());
+           commas(reachable).c_str());
     finalizeTable();
-    closeWork();
-    cleanupWorkFiles();
+    unlink(workPath.c_str());
+    syncCurrentDirectory();
     printf("[reach] total time %.1fs\n", now_s() - started);
   }
 };
@@ -1735,6 +2458,7 @@ static void audit(Solver& Sv, int threads) {
   std::atomic<u64> bad{0};
   std::atomic<u64> chunk{0};
   const u64 CH = 1 << 20;
+  Progress progress("audit", chunk, Sv.Z.total / CH + 1, 1800.0);
   std::vector<std::thread> th;
   for (int t = 0; t < threads; ++t)
     th.emplace_back([&] {
@@ -2086,6 +2810,178 @@ namespace bf {
 }
 
 // ------------------------------------------------------------------------------------------
+// Self-tests of the signature ranks, the rank iterator, and the move / un-move generators
+// against the ZDD and a plain reference move generator.
+// ------------------------------------------------------------------------------------------
+static void setHandFlags(u8* arr, const int* h) {
+  for (int t = 0; t < HAND_TYPES; ++t) {
+    arr[S + 2 * t] = h[t] >= 1;
+    arr[S + 2 * t + 1] = h[t] >= 2;
+  }
+}
+
+// Children of `arr` in genChildren's order, each ranked from an explicitly built position.
+static void referenceChildren(const Zdd& Z, const u8* arr, std::vector<u64>& out,
+                              std::vector<u8>& wonAtOnce) {
+  out.clear(); wonAtOnce.clear();
+  int hb[HAND_TYPES], hw[HAND_TYPES];
+  handCounts(arr, hb);
+  u8 tmp[MAXARR], canon[MAXARR], scratch[MAXARR];
+  auto emit = [&](const int* hand) {
+    setHandFlags(tmp, hand);
+    whiteHand(tmp, hand, hw);
+    buildFlip(tmp, hw, canon);
+    u64 k = Z.rankCanonical(canon, scratch);
+    assert(k != UINT64_MAX);
+    out.push_back(k);
+    // "won at once" means the first test of pass1Eval: the lion can be captured
+    int wl = -1; u32 attB = 0;
+    for (int q = 0; q < S; ++q) {
+      int s = canon[q];
+      if (s == 6) wl = q;
+      if (s >= 1 && s <= PIECE_KINDS) attB |= ATT[s][q];
+    }
+    wonAtOnce.push_back((u8)((attB >> wl) & 1));
+  };
+  for (int q = 0; q < S; ++q) {
+    int s = arr[q];
+    if (s < 1 || s > PIECE_KINDS) continue;
+    for (u8 t : MOV[s][q]) {
+      int tt = arr[t];
+      if (tt >= 1 && tt <= 6) continue;
+      memcpy(tmp, arr, ARR);
+      tmp[q] = 0;
+      tmp[t] = (u8)((s == 4 && rowOf_[t] == 0) ? 5 : s);
+      int h[HAND_TYPES] = {hb[0], hb[1], hb[2]};
+      if (tt >= 7) ++h[tt == 7 ? 0 : tt == 8 ? 1 : 2];
+      emit(h);
+    }
+  }
+  for (int type = 0; type < HAND_TYPES; ++type) {
+    if (!hb[type]) continue;
+    for (int q = 0; q < S; ++q) {
+      if (arr[q]) continue;
+      memcpy(tmp, arr, ARR);
+      tmp[q] = (u8)(2 + type);
+      int h[HAND_TYPES] = {hb[0], hb[1], hb[2]};
+      --h[type];
+      emit(h);
+    }
+  }
+}
+
+static void selftestRetro(const Zdd& Z, std::mt19937_64& rng) {
+  SigRank SR;
+  SR.build(Z.reduceLR);
+  assert(SR.total == Z.total);
+  u8 arr[MAXARR], arr2[MAXARR];
+  SigIter it;
+  it.init(SR);
+  for (int i = 0; i < 200000; ++i) {
+    u64 k = rng() % Z.total;
+    Z.unrank(k, arr);
+    assert(SR.rank(arr) == k);
+    it.seek(k);
+    assert(memcmp(it.pos, arr, ARR) == 0);
+    assert(it.kpre[S] <= k && k < it.kend[S]);
+  }
+  for (int rep = 0; rep < 200; ++rep) {     // forward runs with mixed gaps, then a jump back
+    u64 k = rng() % Z.total;
+    for (int j = 0; j < 400 && k < Z.total; ++j) {
+      it.seek(k);
+      Z.unrank(k, arr);
+      assert(memcmp(it.pos, arr, ARR) == 0);
+      u64 gap = j % 3 == 0 ? 1 : j % 3 == 1 ? 1 + rng() % 40 : 1 + rng() % 100000;
+      k += gap;
+    }
+    it.seek(rng() % Z.total);
+  }
+  {                                          // whole-board intervals partition the ranks
+    u64 k = rng() % (Z.total - 100000), end = k + 100000;
+    it.seek(k);
+    for (u64 e = it.kend[S]; e < end; e = it.kend[S]) {
+      it.seek(e);
+      assert(it.kpre[S] == e);
+      Z.unrank(e - 1, arr); Z.unrank(e, arr2);
+      assert(memcmp(arr, arr2, S) != 0);
+    }
+  }
+  printf("[selftest] signature ranks + iterator match the ZDD\n");
+
+  RankCtx cx;
+  cx.sr = &SR;
+  std::vector<u64> ref, preds;
+  std::vector<u8> won;
+  u64 kids[MAX_KIDS], kids2[MAX_KIDS], kids3[2];
+  int nChildren = 0, nPreds = 0, nSkipped = 0;
+  auto attacksLion = [](const u8* a) {
+    int wl = -1; u32 attB = 0;
+    for (int q = 0; q < S; ++q) {
+      int s = a[q];
+      if (s == 6) wl = q;
+      if (s >= 1 && s <= PIECE_KINDS) attB |= ATT[s][q];
+    }
+    return (bool)((attB >> wl) & 1);
+  };
+  for (int i = 0; i < 40000; ++i) {
+    u64 k = rng() % Z.total;
+    Z.unrank(k, arr);
+    // Positions whose white lion already stands on Black's home rank are terminal; their
+    // "children" would leave the position space and are never generated by the solvers.
+    bool tried = false;
+    for (int q = (R - 1) * C; q < S; ++q) tried |= arr[q] == 6;
+    if (!tried) {
+      // (a) children: generator == reference, in order; skipWon drops exactly the
+      //     children whose lion can be captured at once
+      referenceChildren(Z, arr, ref, won);
+      bool complete, any;
+      int n = genChildren(arr, cx, kids, MAX_KIDS, false, complete, any);
+      assert(complete && n == (int)ref.size() && any == !ref.empty());
+      for (int j = 0; j < n; ++j) assert(kids[j] == ref[j]);
+      int n2 = genChildren(arr, cx, kids2, MAX_KIDS, true, complete, any);
+      assert(complete && any == !ref.empty());
+      int j2 = 0;
+      for (int j = 0; j < n; ++j) {
+        if (won[j]) { ++nSkipped; continue; }
+        assert(j2 < n2 && kids2[j2] == ref[j]);
+        ++j2;
+      }
+      assert(j2 == n2);
+      int n3 = genChildren(arr, cx, kids3, 2, true, complete, any);   // limited generation
+      assert(n3 == std::min(n2, 2) && complete == (n2 <= 2));
+      for (int j = 0; j < n3; ++j) assert(kids3[j] == kids2[j]);
+      nChildren += n;
+      // (b) every child lists this position among its predecessors (unless this position
+      //     already wins by capturing the lion, which genPreds leaves out by design)
+      if (!attacksLion(arr) && i % 4 == 0) {
+        for (int j = 0; j < n; ++j) {
+          Z.unrank(kids[j], arr2);
+          bool found = false;
+          genPreds(arr2, cx, [&](u64 r) { found |= r == k; });
+          assert(found);
+        }
+      }
+    }
+    // (c) every generated predecessor really has this position as a child
+    if (i % 4 == 1) {
+      preds.clear();
+      genPreds(arr, cx, [&](u64 r) { preds.push_back(r); });
+      for (u64 pk : preds) {
+        assert(pk < Z.total);
+        Z.unrank(pk, arr2);
+        assert(!attacksLion(arr2));
+        referenceChildren(Z, arr2, ref, won);
+        assert(std::find(ref.begin(), ref.end(), k) != ref.end());
+        ++nPreds;
+      }
+    }
+  }
+  printf("[selftest] move generator == reference (%d children, %d won at once); "
+         "un-move generator is its exact inverse (%d predecessors)\n",
+         nChildren, nSkipped, nPreds);
+}
+
+// ------------------------------------------------------------------------------------------
 static bool parseHand(const std::string& tok, int* h) {
   h[0] = h[1] = h[2] = 0;
   if (tok == "-") return true;
@@ -2104,8 +3000,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     fprintf(stderr,
       "usage: %s COMMAND [--board ROWSx3] [--symmetry none|lr] [--table PATH]\n"
-      "                       [--threads N] [--ckpt K] [arguments]\n"
-      "       COMMAND: selftest | solve | reach | reach-audit | info |\n"
+      "                       [--threads N] [--ckpt-min MINUTES] [--ckpt K] [arguments]\n"
+      "       COMMAND: selftest | solve | solve-forward | reach | reach-audit | info |\n"
       "                verify-rust [dump] | compare-full [full-table] | audit |\n"
       "                bfcheck [samples depth] | analyze |\n"
       "                probe <b|w> <ROWS*3 cells> <sente-hand|-> <gote-hand|->\n"
@@ -2118,6 +3014,7 @@ int main(int argc, char** argv) {
   std::string cmd = argv[1];
   int threads = (int)std::max(1u, std::thread::hardware_concurrency());
   int ckpt = 10, rows = MIN_R;
+  double ckptMinutes = 120.0;
   bool reflectionReduced = false;
   std::string explicitTable;
   std::vector<std::string> rest;
@@ -2125,6 +3022,7 @@ int main(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--threads" && i + 1 < argc) threads = atoi(argv[++i]);
     else if (a == "--ckpt" && i + 1 < argc) ckpt = atoi(argv[++i]);
+    else if (a == "--ckpt-min" && i + 1 < argc) ckptMinutes = atof(argv[++i]);
     else if (a == "--symmetry" && i + 1 < argc) {
       std::string mode = argv[++i];
       if (mode == "lr") reflectionReduced = true;
@@ -2143,6 +3041,7 @@ int main(int argc, char** argv) {
   }
   if (threads < 1) die("--threads must be at least 1");
   if (ckpt < 1) die("--ckpt must be at least 1");
+  if (!(ckptMinutes >= 0)) die("--ckpt-min must be nonnegative");
   initTables(rows);
   char pathbuf[128];
   snprintf(pathbuf, sizeof pathbuf, reflectionReduced ? "wdl_%dx%d_lr.bin"
@@ -2201,8 +3100,6 @@ int main(int argc, char** argv) {
         mirrorPosition(arr, arr2);
         assert(Z.rankCanonical(arr2, scratch) == k);
       }
-      unpackPosition(packPosition(arr), arr2);
-      assert(memcmp(arr, arr2, ARR) == 0);
     }
     printf("[selftest] rank/unrank + invariants OK\n");
     ZddIter it;
@@ -2291,17 +3188,27 @@ int main(int argc, char** argv) {
     }
     printf("[selftest] %s child-rank OK (%d children)\n",
            reflectionReduced ? "canonical" : "cached", checked);
+    selftestRetro(Z, rng);
     printf("[selftest] ALL OK\n");
-  } else if (cmd == "solve") {
+  } else if (cmd == "solve" || cmd == "solve-forward") {
+    interleaveMemory();
     Solver Sv(reflectionReduced);
     Sv.threads = threads;
-    printf("[solve] %dx3 dobutsu shogi, %d threads, table %s\n", R, threads, tablePath.c_str());
+    printf("[solve] %dx3 dobutsu shogi, %d threads, table %s%s\n", R, threads,
+           tablePath.c_str(), cmd == "solve" ? "" : " (forward iteration)");
     Sv.setup(tablePath);
     double t0 = now_s();
-    Sv.solve(ckpt);
+    if (cmd == "solve") {
+      RetroSolver retro(Sv);
+      retro.setup();
+      retro.solve(ckptMinutes);
+    } else {
+      Sv.solve(ckpt);
+    }
     printf("[solve] total time %.1fs\n", now_s() - t0);
   } else if (cmd == "reach") {
-    Reachability reach(threads, tablePath, reflectionReduced);
+    interleaveMemory();
+    Reachability reach(threads, tablePath, reflectionReduced, ckptMinutes);
     reach.run();
   } else if (cmd == "reach-audit") {
     auditReachabilityFile(tablePath, threads, reflectionReduced);

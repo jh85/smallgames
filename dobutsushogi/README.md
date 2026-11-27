@@ -119,6 +119,87 @@ orbit universe; the K plane identifies the subset reachable from the initial pos
   independent reference result or full-index table at this size, and a complete
   fixpoint audit has not yet been run.
 
+## The retrograde solver (`solve`) and the forward solver (`solve-forward`)
+
+Both solvers number their passes the same way and decide exactly the same positions in
+each pass, so they write byte-identical tables, including the per-pass history in the
+header. They differ only in how much work a pass costs.
+
+**`solve-forward`** is the original algorithm. Every pass re-evaluates *every* undecided
+position by generating its children and looking them up. A position that ends as a draw
+is therefore examined once per pass: at 8×3 each of the last ~250 passes still cost about
+1,830 seconds while deciding almost nothing, and the solve took 9 days 17 hours. By
+extrapolation the same algorithm would need about a month for 9×3.
+
+**`solve`** is a frontier-driven retrograde analysis. Only the positions decided in the
+previous pass are expanded, through un-move generation, so the total work is proportional
+to the number of decided positions instead of passes × undecided positions.
+
+* Pass 1 assigns the intrinsic values, evaluated once per board (all hand distributions
+  of a board share the value).
+* Pass 2 is the only full forward scan: an undecided position all of whose children are
+  pass-1 wins is a loss.
+* An odd pass `k` turns every undecided predecessor of a loss decided in pass `k-1` into
+  a win.
+* An even pass `k` marks the undecided predecessors of the wins decided in pass `k-1`
+  and then verifies each marked position: it is a loss if all its children are wins.
+  Most candidates are refuted by their first or second child, so children are ranked
+  lazily, and a dozen candidates per thread are verified in an interleaved fashion so
+  that their (prefetched) table lookups overlap.
+
+An undecided position cannot have a lost child from an earlier pass — it would have been
+marked a win one pass after that child — so "all children are decided wins" is the whole
+loss test. Children in which the opponent can capture the lion at once, and predecessors
+in which a second piece already attacks the lion, are recognised from the board without
+any table access.
+
+The un-move generator (move a piece back, optionally restoring a captured piece from the
+mover's hand, un-promote a hen that has just arrived on the far rank, or take a dropped
+piece back into the hand) is the exact inverse of the move generator; `selftest` checks
+this in both directions against a plain reference move generator.
+
+**Ranking without walking the ZDD.** The rank of a position is the number of members
+that precede it in the ZDD's order. The number of completions of a board prefix depends
+only on a small signature — lions placed, numbers of elephants, giraffes and chicks on
+the board, and for reflection-reduced tables whether an earlier row already decided
+left < right plus the state of the current row's left square. The rank is therefore the
+sum of one table entry per square (at 9×3, 27 lookups whose addresses do not depend on
+earlier lookups, instead of a chain of ~270 ZDD nodes), and a child or predecessor that differs
+from its parent in one or two squares is ranked from its first changed row using the
+parent's prefix sums. The tables come from an independent DP; they reproduce the ZDD
+ranks exactly, which `selftest` verifies, so the table format is unchanged.
+
+**Memory.** Besides the two-bit table the retrograde solver keeps one bit per position
+marking the positions decided in the previous pass: three bits per position in total —
+610.5 GB for 9×3 (407 GB + 203.5 GB), spread over all NUMA nodes on transparent huge
+pages.
+
+**Checkpoints.** Every `--ckpt-min` minutes (default 120) the solver writes an atomic
+checkpoint at a pass boundary: an ordinary table in which the positions decided by the
+last completed pass are stored as state 3 (their value follows from the parity of the
+pass). Running `solve` again resumes from it. Tables and checkpoints are read and written
+in parallel, with `O_DIRECT` for their block-aligned parts, so a 400 GB checkpoint does
+not compete for memory with the tables it saves.
+
+Wall-clock times on 2× EPYC 9115 (64 threads), reflection-reduced tables. The 4×3, 5×3
+and 7×3 entries of the new commands were measured with a slightly slower development
+revision:
+
+| board | `solve-forward` | `solve` | old `reach` | `reach` |
+|---|---:|---:|---:|---:|
+| 4×3 | 75.5 s | 27 s | — | 5 s |
+| 5×3 | 28.2 min | 70 s | — | 27 s |
+| 6×3 | 5 h 51 min | 5 min 50 s | — | 3 min 21 s |
+| 7×3 | 44 h 39 min | 41 min 29 s | 1 h 7 min | 18 min 37 s |
+| 8×3 | 9 d 17 h | — | 7 h 6 min | — |
+
+The solve times quoted in the result sections above are those of the forward solver.
+Every table the retrograde solver and the new `reach` produce for 4×3 through 7×3 — and
+the full-rank 4×3 table — is bit-for-bit identical to the earlier one (same SHA-256, see
+below). The 8×3 re-run and the first 9×3 run (1,627,972,380,360 orbits, which the
+forward solver could not finish in reasonable time) had not completed when this was
+written; their timings and the 9×3 results will be added when they have.
+
 ## Reflection reduction, reachability, and table formats
 
 The default mode retains the original full oriented ZDD ranks. `--symmetry lr` instead
@@ -127,20 +208,22 @@ orbit. The reduced rank is not a sparse minimum of two old ranks: its cardinalit
 independently checked using Burnside's lemma and a DP count of mirror-fixed positions.
 
 `solve` writes an 8 KiB header followed by a two-bit WDL plane. `reach` performs an
-independent, resumable forward traversal and appends a one-bit **K plane** (`1` = reachable)
-to the same file. Only after the traversal, count check, K-plane write, and `fsync` succeed
-is the header updated. Interrupted work resumes from mode-specific `reach_work_*` and
-`reach_frontier_*` files.
+independent breadth-first traversal from the initial position and appends a one-bit
+**K plane** (`1` = reachable) to the same file. Only after the traversal, count check,
+K-plane write, and `fsync` succeed is the header updated. The traversal keeps two bits per
+position in memory (unseen / reached / current frontier / found in this level) and
+checkpoints level boundaries to `reach_work_*.bin` every `--ckpt-min` minutes, from which
+an interrupted run resumes.
 
 ```
 ./dobutsu solve --board 4x3
 ./dobutsu reach --board 4x3 --threads 64
 ./dobutsu analyze --board 4x3       # now also prints reachability
 
-./dobutsu solve --board 8x3 --symmetry lr --threads 64 --ckpt 5
-./dobutsu reach --board 8x3 --symmetry lr --threads 64
-./dobutsu reach-audit --board 8x3 --symmetry lr
-./dobutsu info --board 8x3 --symmetry lr
+./dobutsu solve --board 9x3 --symmetry lr --threads 64 --ckpt-min 120
+./dobutsu reach --board 9x3 --symmetry lr --threads 64
+./dobutsu reach-audit --board 9x3 --symmetry lr
+./dobutsu info --board 9x3 --symmetry lr
 ```
 
 The C++ ZDD assigns separate ranks to left/right reflections. Consequently its 4×3 K plane
@@ -177,6 +260,7 @@ not overwrite or reuse the full-rank files.
 | 6×3 | 18,227,046,800 | 27,340,566,104 | 9,113,975,704 | 13,670,959,464 |
 | 7×3 | 79,655,326,384 | 119,482,985,480 | 39,829,522,424 | 59,744,279,544 |
 | 8×3 | 276,885,975,736 | 415,328,959,512 | 138,449,481,152 | 207,674,217,632 |
+| 9×3 | 813,946,548,408 | 1,220,919,818,520 | 406,993,103,288 | 610,489,650,840 |
 
 Sizes in this table are bytes and include the 8 KiB header.
 
@@ -184,11 +268,12 @@ Sizes in this table are bytes and include the 8 KiB header.
 
 ```
 make                 # g++ -O3, C++20
-./dobutsu selftest   # ZDD/DP count, rank/unrank, iterator, child-rank checks
-./dobutsu solve      # full solve -> wdl_4x3.bin (resumable, ~2 min)
-./dobutsu selftest --board 8x3
-./dobutsu selftest --board 8x3 --symmetry lr
-./dobutsu solve --board 7x3 --symmetry lr --threads 64 --ckpt 5
+./dobutsu selftest   # ZDD/DP count, rank/unrank, iterators, move and un-move generators
+./dobutsu solve      # retrograde solve -> wdl_4x3.bin (resumable, under a minute)
+./dobutsu selftest --board 9x3
+./dobutsu selftest --board 9x3 --symmetry lr
+./dobutsu solve --board 7x3 --symmetry lr --threads 64 --ckpt-min 60
+./dobutsu solve-forward --board 4x3 --symmetry lr --ckpt 5   # original algorithm
 ./dobutsu reach --board 4x3 --threads 64
 ./dobutsu reach --board 4x3 --symmetry lr --threads 64
 ./dobutsu reach-audit --board 4x3
@@ -201,7 +286,7 @@ make                 # g++ -O3, C++20
 ./dobutsu probe <b|w> <ROWS*3 cells> <sente-hand|-> <gote-hand|->
 ```
 
-Use `--board ROWSx3` with `ROWS` from 4 through 8; the default is 4×3. The default table is
+Use `--board ROWSx3` with `ROWS` from 4 through 9; the default is 4×3. The default table is
 `wdl_<rows>x3.bin`; `--symmetry lr` uses `wdl_<rows>x3_lr.bin`. `--table PATH` overrides
 either name. Tables and reference dumps are read and written relative to the current
 working directory, so the solver tree can be moved without changing source code.
@@ -255,10 +340,12 @@ with:
 then **6 unary items for Sente's hand only** — E≥1, E≥2, G≥1, G≥2, C≥1, C≥2. Gote's hand
 is the per-type remainder (2 − on-board − Sente's hand), so it needs no items and the
 hash stays bijective. The construction frontier tracks only (square-flag, lions placed,
-#E, #G, #C on board). The full-index ZDD ranges from **5,038 nodes** at 4×3 to **13,246
-nodes** at 8×3. The reflection-reduced ZDD carries a small comparison state and ranges
-from **13,097** to **43,481 nodes**, while reducing the indexed universe to
-553,797,891,822 orbits at 8×3. Rank/unrank/iteration work exactly as in the NOCCA solver.
+#E, #G, #C on board). The full-index ZDD ranges from **5,038 nodes** at 4×3 to **15,298
+nodes** at 9×3. The reflection-reduced ZDD carries a small comparison state and ranges
+from **13,097** to **51,118 nodes**, while reducing the indexed universe to
+1,627,972,380,360 orbits at 9×3 (from 3,255,786,160,848 full positions, 158,599,872 of
+them mirror-fixed). Rank/unrank/iteration through the ZDD work exactly as in the NOCCA
+solver; the retrograde solver computes the same ranks from signature tables (see above).
 
 A pleasant consequence of the canonicalization: after Sente moves, the child's *explicit*
 (Sente) hand equals the parent's Gote hand, which the move never touches — so every child
@@ -287,7 +374,7 @@ Follows the reference Rust solver (which reproduces Tanaka 2009):
 
 | file | contents |
 |---|---|
-| `dobutsu.cpp`, `Makefile` | complete standalone solver and build recipe (~2,400 lines C++) |
+| `dobutsu.cpp`, `Makefile` | complete standalone solver and build recipe (~3,300 lines C++) |
 | `README.md` | results, format documentation, build instructions, and command examples |
 | `wdl_<rows>x3.bin`, `wdl_<rows>x3_lr.bin` | packed full-rank or reflection-reduced table: 8 KiB header + two-bit WDL plane and, after `reach`, one-bit K plane; WDL 0 = draw, 1 = win, 2 = loss; K 1 = reachable |
 

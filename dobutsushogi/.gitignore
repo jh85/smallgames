@@ -8,10 +8,9 @@
 /wdl_*.bin
 /wdl_*.bin.tmp
 
-# Reachability traversal work/frontier files
+# Reachability traversal checkpoints
 /reach_work_*.bin
-/reach_frontier_*.bin
-/reach_frontier_*.tmp
+/reach_work_*.bin.tmp
 /reach_*.log
 
 # Independent reference dumps (multi-gigabyte files)
