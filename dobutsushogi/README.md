@@ -1,12 +1,12 @@
-# Dobutsu Shogi strong solver (ZDD + retrograde analysis) — 4×3 through 8×3
+# Dobutsu Shogi strong solver (ZDD + retrograde analysis) — 4×3 through 9×3
 
-Strongly solves Dobutsu Shogi (どうぶつしょうぎ) on boards from 4×3 through 8×3 with a
+Strongly solves Dobutsu Shogi (どうぶつしょうぎ) on boards from 4×3 through 9×3 with a
 ZDD-based minimal perfect hash and retrograde analysis — the NOCCA × NOCCA architecture
 (after Yamamoto & Hoki, GPW 2022), extended to a game with captures, pieces in hand,
 drops, and promotion. Produces a packed 2-bit WDL table answering win/draw/loss for any
 position. Both full oriented indexing and dense left/right-reflection-orbit indexing are
 supported. Production strong solves and reflection-reduced K reachability traversals have
-been completed for every board size from 4×3 through 8×3.
+been completed for every board size from 4×3 through 9×3.
 
 ## Solved values and reachable position counts
 
@@ -21,6 +21,7 @@ orbit universe; the K plane identifies the subset reachable from the initial pos
 | 6×3 | draw | 36,455,870,040 | 24,234,040,896 | 244 |
 | 7×3 | draw | 159,318,056,898 | 117,526,891,855 | 286 |
 | 8×3 | draw | 553,797,891,822 | 437,313,446,641 | 321 |
+| 9×3 | draw | 1,627,972,380,360 | 1,347,383,538,122 | 386 |
 
 ## Results — 4×3 (solved + validated 2026-07-30)
 
@@ -119,6 +120,33 @@ orbit universe; the K plane identifies the subset reachable from the initial pos
   independent reference result or full-index table at this size, and a complete
   fixpoint audit has not yet been run.
 
+## Results — 9×3 variant (`--board 9x3 --symmetry lr`, solved 2026-11-27) — new result
+
+* **The initial position is a DRAW**; all four opening moves draw.
+* Reflection-reduced position space: **1,627,972,380,360** pseudo-position orbits (ZDD:
+  51,118 nodes), independently cross-checked from 3,255,786,160,848 full positions and
+  158,599,872 mirror-fixed positions. W/L/D =
+  **1,125,574,571,979 / 410,344,410,827 / 92,053,397,554**. The last new values were found
+  at pass 385 (the longest forced win in the space is 385 plies) and the solve converged
+  at pass 386.
+* Solved with the retrograde solver described below, in a single run on 2× EPYC 9115
+  (64 threads, 723 GiB RAM): **29,968.4 seconds** (8 h 19 min 28 s), including three
+  checkpoints. The forward solver used for the smaller boards would have needed about a
+  month.
+* The forward traversal found **1,347,383,538,122 reachable reflection orbits** in
+  **16,653.6 seconds** (4 h 37 min 34 s), reaching a fixed point at traversal level 69.
+  `reach-audit` verified the exact K popcount, initial bit, padding, and file size.
+* The final version-3 reduced WDL+K table is **610,489,650,840 bytes**. SHA-256:
+  `55d2844dd809376bd6cd58e21efb5140cca9c22ef06f2f7fb502d4ede2f374db`.
+* Validation:
+  * **Full fixpoint audit over all 1,627,972,380,360 orbits: 0 inconsistencies**
+    (9 h 18 min). `audit` re-derives every value with the ZDD iterator, the ZDD rank and
+    the forward move generator, sharing no ranking or un-move code with the retrograde
+    solver.
+  * The same binary reproduces the earlier 4×3 through 8×3 tables bit for bit.
+  * The independent ZDD/DP count cross-check and structural self-tests pass.
+  * There is no independent reference result or full-index table at this size.
+
 ## The retrograde solver (`solve`) and the forward solver (`solve-forward`)
 
 Both solvers number their passes the same way and decide exactly the same positions in
@@ -191,14 +219,14 @@ revision:
 | 5×3 | 28.2 min | 70 s | — | 27 s |
 | 6×3 | 5 h 51 min | 5 min 50 s | — | 3 min 21 s |
 | 7×3 | 44 h 39 min | 41 min 29 s | 1 h 7 min | 18 min 37 s |
-| 8×3 | 9 d 17 h | — | 7 h 6 min | — |
+| 8×3 | 9 d 17 h | 2 h 21 min | 7 h 6 min | 1 h 18 min |
+| 9×3 | — | 8 h 19 min | — | 4 h 38 min |
 
-The solve times quoted in the result sections above are those of the forward solver.
-Every table the retrograde solver and the new `reach` produce for 4×3 through 7×3 — and
+The solve times quoted in the 4×3 through 8×3 result sections above are those of the
+forward solver.
+Every table the retrograde solver and the new `reach` produce for 4×3 through 8×3 — and
 the full-rank 4×3 table — is bit-for-bit identical to the earlier one (same SHA-256, see
-below). The 8×3 re-run and the first 9×3 run (1,627,972,380,360 orbits, which the
-forward solver could not finish in reasonable time) had not completed when this was
-written; their timings and the 9×3 results will be added when they have.
+below). 9×3 (1,627,972,380,360 orbits) was solved only with the new commands.
 
 ## Reflection reduction, reachability, and table formats
 
@@ -292,11 +320,11 @@ either name. Tables and reference dumps are read and written relative to the cur
 working directory, so the solver tree can be moved without changing source code.
 
 Generated WDL tables, reference dumps, reachability work files, and the compiled executable
-are excluded by `.gitignore`. The completed reflection-reduced version-3 WDL+K tables are
-published in the [Dobutsu Shogi WDL Databases dataset on Hugging Face](https://huggingface.co/datasets/eii/dobutsushogi).
+are excluded by `.gitignore`. The reflection-reduced version-3 WDL+K tables for 4×3 through
+8×3 are published in the [Dobutsu Shogi WDL Databases dataset on Hugging Face](https://huggingface.co/datasets/eii/dobutsushogi).
 The 4×3 through 6×3 tables are single-file downloads. The 7×3 and 8×3 tables are split
 into 20 GiB parts (except for each final part) and must be reconstructed after download.
-The full-rank 4×3 version-2 table has not been published.
+The full-rank 4×3 version-2 table and the 9×3 table have not been published.
 
 | board/format | WDL+K download | size (bytes) | SHA-256 |
 |---|---|---:|---|
@@ -306,6 +334,7 @@ The full-rank 4×3 version-2 table has not been published.
 | 6×3 reduced v3 | [single file](https://huggingface.co/datasets/eii/dobutsushogi/resolve/main/data/wdl_6x3_lr.bin?download=true) | 13,670,959,464 | `3e60fdd7c61873d98c8f0ed8d3a11445f3a2c80a4fcfb860cb027fb3715eaad1` |
 | 7×3 reduced v3 | [3 parts](https://huggingface.co/datasets/eii/dobutsushogi/tree/main/data/wdl_7x3_lr.bin.parts) | 59,744,279,544 | `7dbfc5c2132268b3bf9f03a886bbd846ea3aee1d0d43a1ec6efdf53d7a93dd3f` |
 | 8×3 reduced v3 | [10 parts](https://huggingface.co/datasets/eii/dobutsushogi/tree/main/data/wdl_8x3_lr.bin.parts) | 207,674,217,632 | `b40ffd55b2d7c77334e5957f5e5b3003c76bf0d5120cc058924511a0c90d8b8c` |
+| 9×3 reduced v3 | not published | 610,489,650,840 | `55d2844dd809376bd6cd58e21efb5140cca9c22ef06f2f7fb502d4ede2f374db` |
 
 Reconstruct the split tables from the directory containing their downloaded parts, then
 verify the finished files against the hashes above:
